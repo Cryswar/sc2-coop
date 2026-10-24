@@ -35,7 +35,10 @@ Both players need:
 - **The buddy's controls:** the game itself doesn't let a joining player click on units in the world. The launcher
   translates those clicks, drag boxes, targeted commands and arrow-key scrolling.
 
-How it works, and how to make a campaign co-op-ready: [`docs/PORTING.md`](docs/PORTING.md).
+More documentation:
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): how the launcher works.
+- [`docs/PITFALLS.md`](docs/PITFALLS.md): traps in Galaxy, the SC2 API, the campaign libraries and Windows input.
+- [`docs/PORTING.md`](docs/PORTING.md): how to make a campaign co-op-ready.
 
 ## How it works (short)
 
