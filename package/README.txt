@@ -172,6 +172,15 @@ Updating
 --------
 Unzip a newer SC2Coop.zip over the old folder (your settings and co-op saves are kept) and start it; it prepares
 again by itself when needed. Both players need the same version.
+When a newer version is out, the launcher shows an "Update available" button at the top (it opens the download page).
+To check, it asks GitHub for the list of releases when it starts; set SC2_COOP_NO_UPDATE_CHECK=1 to turn that off.
+
+Reporting a problem
+-------------------
+Click "Save logs..." (under Start) and send the zip it makes, with what happened and roughly when. It holds the
+launcher's logs of your recent sessions and StarCraft II's own logs (graphics and crash reports) from the last two
+days. The logs contain player names, Steam lobby ids and folder paths, nothing else from your PC. Both players'
+logs help: the problem may show on only one side.
 
 Known limitations
 -----------------

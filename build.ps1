@@ -9,7 +9,7 @@ New-Item -ItemType Directory -Force (Join-Path $pkg "third-party") | Out-Null
 
 $sources=Get-ChildItem "$root\src\*.cs" | ForEach-Object { $_.FullName }
 & C:/Windows/Microsoft.NET/Framework64/v4.0.30319/csc.exe /nologo /target:$Target /platform:x64 "/out:$pkg\SC2Coop.exe" `
-  /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Web.Extensions.dll /reference:System.Xml.Linq.dll `
+  /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Web.Extensions.dll /reference:System.Xml.Linq.dll /reference:System.IO.Compression.dll /reference:System.IO.Compression.FileSystem.dll `
   $sources
 if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
 

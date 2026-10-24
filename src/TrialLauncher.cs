@@ -539,6 +539,9 @@ static class UdpTest {
 }
 
 class Program {
+    // The release this build becomes (tag v<Version>); the update notice compares it with GitHub's releases. Bump it
+    // before building a release.
+    public const string Version="0.2.0";
     public static string Base=AppDomain.CurrentDomain.BaseDirectory;
     public static string LogFile;
     public static Action<string> UiLog;
@@ -661,6 +664,8 @@ class Program {
                 else foreach(var n in CampaignSnapshots.List(st))Console.WriteLine(n);
                 return 0;
             }
+            // save-logs <file.zip>: the launcher's "Save logs…" (recent launcher and StarCraft II logs in one zip).
+            if(args.Length>1&&args[0]=="save-logs"){Console.WriteLine("Saved "+new LauncherController().SaveLogs(Path.GetFullPath(args[1]),"")+" files to "+Path.GetFullPath(args[1]));return 0;}
             // campaign-reset <config> <campaign folder>: the launcher's "Reset…" (the campaign's co-op save starts over).
             if(args.Length>2&&args[0]=="campaign-reset") {
                 string backup=CampaignSaves.Reset(Load(Path.GetFullPath(args[1])),args[2]);

@@ -71,6 +71,65 @@ class LauncherController {
         if(dir!=null)foreach(var f in new[]{CampaignFolderFile,UserFile("campaign-folder.txt")})try{Directory.CreateDirectory(Path.GetDirectoryName(f));File.WriteAllText(f,dir);}catch{}
     }
 
+    // Update notice: the newest release on GitHub, if it is newer than this launcher (Program.Version). Pre-releases count
+    // (every build so far is a test build). Null when there is none, when offline, or with SC2_COOP_NO_UPDATE_CHECK=1;
+    // test runs (SC2_COOP_TEST_*) never ask.
+    public const string ReleasesPage="https://github.com/Cryswar/sc2-coop/releases";
+    public class Release {public string Tag,Url;}
+    public static Task<Release> NewerRelease() {
+        return Task.Run(()=>{
+            if(Environment.GetEnvironmentVariable("SC2_COOP_NO_UPDATE_CHECK")=="1"||Environment.GetEnvironmentVariables().Keys.Cast<string>().Any(k=>k.StartsWith("SC2_COOP_TEST_")))return null;
+            try {
+                System.Net.ServicePointManager.SecurityProtocol|=System.Net.SecurityProtocolType.Tls12;
+                var req=(System.Net.HttpWebRequest)System.Net.WebRequest.Create("https://api.github.com/repos/Cryswar/sc2-coop/releases?per_page=10");
+                req.UserAgent="SC2Coop/"+Program.Version;req.Accept="application/vnd.github+json";req.Timeout=8000;req.ReadWriteTimeout=8000;
+                string json;using(var resp=req.GetResponse())using(var r=new StreamReader(resp.GetResponseStream()))json=r.ReadToEnd();
+                var list=new System.Web.Script.Serialization.JavaScriptSerializer().Deserialize<List<Dictionary<string,object>>>(json);
+                Version mine=ParseVersion(Program.Version),best=null;Release found=null;
+                foreach(var rel in list) {
+                    if(rel.ContainsKey("draft")&&rel["draft"] is bool&&(bool)rel["draft"])continue;
+                    var v=ParseVersion(rel["tag_name"] as string);
+                    if(v!=null&&mine!=null&&v>mine&&(best==null||v>best)){best=v;found=new Release{Tag=(string)rel["tag_name"],Url=rel["html_url"] as string??ReleasesPage};}
+                }
+                return found;
+            } catch(Exception e){Program.Log("Update check: "+e.GetBaseException().Message);return null;}
+        });
+    }
+    // "v0.2.0" or "0.2.0" -> 0.2.0; null if not a version.
+    static Version ParseVersion(string tag){Version v;return tag!=null&&Version.TryParse(tag.TrimStart('v','V'),out v)?v:null;}
+
+    // Save logs (for a bug report): the launcher's newest session logs, what the window showed, and StarCraft II's own
+    // game logs (crash and graphics reports; the newest 20 from the last two days: every game start writes two), in one zip. They contain player names, Steam lobby
+    // ids and folder paths, nothing else from the PC. Returns how many files went in.
+    public int SaveLogs(string zipPath,string windowText) {
+        string workspace=Path.Combine(Program.Base,"local");
+        try{workspace=Program.Load(Config).Workspace;}catch{}
+        if(File.Exists(zipPath))File.Delete(zipPath);
+        int count=0;long total=0;const long MaxFile=8L<<20,MaxTotal=60L<<20;
+        using(var zip=System.IO.Compression.ZipFile.Open(zipPath,System.IO.Compression.ZipArchiveMode.Create)) {
+            Action<string,string> add=(path,name)=>{
+                try{var len=new FileInfo(path).Length;if(len>MaxFile||total+len>MaxTotal)return;
+                    using(var src=new FileStream(path,FileMode.Open,FileAccess.Read,FileShare.ReadWrite))using(var dst=zip.CreateEntry(name).Open())src.CopyTo(dst);
+                    total+=len;count++;}catch{}
+            };
+            var entry=zip.CreateEntry("launcher-window.txt");
+            using(var w=new StreamWriter(entry.Open()))w.Write("SC2Coop "+Program.Version+Environment.NewLine+(windowText??""));
+            count++;
+            // Newest 12 sessions (each run folder: launcher.log and any other text logs).
+            string runs=Path.Combine(workspace,"runs");
+            if(Directory.Exists(runs))
+                foreach(var dir in Directory.GetDirectories(runs).OrderByDescending(d=>Path.GetFileName(d),StringComparer.Ordinal).Take(12))
+                    foreach(var f in Directory.GetFiles(dir).Where(f=>f.EndsWith(".log",StringComparison.OrdinalIgnoreCase)||f.EndsWith(".txt",StringComparison.OrdinalIgnoreCase)))
+                        add(f,"runs/"+Path.GetFileName(dir)+"/"+Path.GetFileName(f));
+            // StarCraft II's GameLogs (Graphics, SystemInfo, crash reports): what the game itself says about a crash.
+            string gameLogs=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),"StarCraft II","GameLogs");
+            if(Directory.Exists(gameLogs))
+                foreach(var f in Directory.GetFiles(gameLogs,"*",SearchOption.AllDirectories).Where(f=>File.GetLastWriteTime(f)>DateTime.Now.AddDays(-2)).OrderByDescending(File.GetLastWriteTime).Take(20))
+                    add(f,"GameLogs/"+f.Substring(gameLogs.Length+1).Replace('\\','/'));
+        }
+        return count;
+    }
+
     // Prepared and valid for this launcher version? text: what to show.
     public bool Ready(out string text) {
         try {var st=Program.Load(Config);Program.Validate(st);text="Ready. Prepared from "+st.Install;return true;}

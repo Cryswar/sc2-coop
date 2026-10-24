@@ -133,7 +133,7 @@ class LauncherWindow : Form {
     readonly LauncherController core=new LauncherController();
     readonly List<ModeTile> tiles=new List<ModeTile>();
     Label prepared,statusText,latency,targetLabel,targetHint,campaignNone;Panel statusDot;
-    FlatButton prepare,start,stop,find,browse,details;
+    FlatButton prepare,start,stop,find,browse,details,update,saveLogs;readonly ToolTip logTip=new ToolTip();
     Field address,campaignDir,playerName;ComboBox friend,playerColor;Toggle campaign;
     TextBox log;Card targetCard,playCard,youCard;
     LaunchTone tone=LaunchTone.Idle;bool ready,showDetails;int collapsedHeight;
@@ -141,7 +141,7 @@ class LauncherWindow : Form {
     public LauncherWindow() {
         try{Theme.Scale=GetDpiForSystem()/96f;}catch{Theme.Scale=1f;}
         if(Theme.Scale<1f)Theme.Scale=1f;
-        Text="StarCraft II Co-op";BackColor=Theme.Back;ForeColor=Theme.Text;Font=Theme.Font(13,FontStyle.Regular);
+        Text="StarCraft II Co-op "+Program.Version;BackColor=Theme.Back;ForeColor=Theme.Text;Font=Theme.Font(13,FontStyle.Regular);
         FormBorderStyle=FormBorderStyle.FixedSingle;MaximizeBox=false;StartPosition=FormStartPosition.CenterScreen;DoubleBuffered=true;
         try{Icon=Icon.ExtractAssociatedIcon(Application.ExecutablePath);}catch{}
         core.LoadChoices();
@@ -153,6 +153,10 @@ class LauncherWindow : Form {
         FormClosing+=(s,e)=>{if(core.StopForClose())e.Cancel=true;};
         Shown+=async (s,e)=>{
             ActiveControl=null;RefreshReady();
+            // Update notice: a newer release on GitHub shows a button next to the title (opens the release page).
+            var newer=await LauncherController.NewerRelease();
+            if(newer!=null){update.Text="Update available: "+newer.Tag;update.Tag=newer.Url;update.Visible=true;update.BringToFront();
+                Program.Log("A newer SC2Coop is out: "+newer.Tag+" ("+newer.Url+"). Both players need the same version.");}
             // Not prepared (first run, or a new version): prepare from the StarCraft II folder found by itself; Prepare… is the
             // fallback when none is found or this fails.
             string found=core.AutoPrepareFolder();
@@ -197,7 +201,11 @@ class LauncherWindow : Form {
         const int W=760,M=24,inner=W-2*M;
         SuspendLayout();
         int y=18;
-        AddLabel(this,"StarCraft II Co-op",M,y,inner,Theme.Semibold(24),Theme.Text);y+=36;
+        AddLabel(this,"StarCraft II Co-op",M,y,inner,Theme.Semibold(24),Theme.Text);
+        update=new FlatButton{Text="Update available",Primary=true,Font=Theme.Semibold(12),BackColor=Theme.Back,Visible=false};
+        update.SetBounds(Theme.S(M+inner-250),Theme.S(y),Theme.S(250),Theme.S(34));
+        update.Click+=(s,e)=>{try{System.Diagnostics.Process.Start((update.Tag as string)??LauncherController.ReleasesPage);}catch(Exception error){Program.Log("Could not open the release page: "+error.Message);}};
+        Controls.Add(update);y+=36;
         AddLabel(this,"Two players share one army in the Wings of Liberty campaign. Both need StarCraft II 5.0.17 (English); nothing is copied between PCs.",M,y,inner,Theme.Font(13,FontStyle.Regular),Theme.Muted).Height=Theme.S(44);
         y+=52;
 
@@ -273,6 +281,8 @@ class LauncherWindow : Form {
         AcceptButton=start;
         y+=60;
         details=new FlatButton{Text="Show details",Font=Theme.Font(12,FontStyle.Regular),BackColor=Theme.Back};details.SetBounds(Theme.S(M),Theme.S(y),Theme.S(130),Theme.S(30));details.Click+=(s,e)=>ToggleDetails();Controls.Add(details);
+        saveLogs=new FlatButton{Text="Save logs…",Font=Theme.Font(12,FontStyle.Regular),BackColor=Theme.Back};saveLogs.SetBounds(Theme.S(M+140),Theme.S(y),Theme.S(130),Theme.S(30));saveLogs.Click+=OnSaveLogs;Controls.Add(saveLogs);
+        logTip.SetToolTip(saveLogs,"Zip the recent launcher and StarCraft II logs into one file, to send with a bug report");
         y+=42;
         log=new TextBox{Multiline=true,ReadOnly=true,ScrollBars=ScrollBars.Vertical,BorderStyle=BorderStyle.None,BackColor=Theme.Card,ForeColor=Color.FromArgb(200,206,214),Font=new Font("Consolas",12*Theme.Scale,GraphicsUnit.Pixel),Visible=false};
         log.SetBounds(Theme.S(M),Theme.S(y),Theme.S(inner),Theme.S(220));Controls.Add(log);
@@ -433,6 +443,18 @@ class LauncherWindow : Form {
         try{var list=await core.FindFriends();friend.Items.Clear();foreach(var f in list)friend.Items.Add(f);if(list.Count>0)friend.SelectedIndex=0;}
         catch(Exception error){Program.Log("ERROR: "+error.GetBaseException().Message);}
         finally{find.Enabled=!core.Running;}
+    }
+
+    void OnSaveLogs(object sender,EventArgs e) {
+        using(var d=new SaveFileDialog{Title="Save logs for a bug report",Filter="Zip file (*.zip)|*.zip",FileName="SC2Coop-logs-"+DateTime.Now.ToString("yyyyMMdd-HHmm")+".zip",
+            InitialDirectory=Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)}) {
+            if(d.ShowDialog(this)!=DialogResult.OK)return;
+            try {
+                int n=core.SaveLogs(d.FileName,log.Text);
+                Program.Log("Saved "+n+" log files to "+d.FileName+". Send that file with your bug report (it has player names and folder paths, nothing else from your PC).");
+                try{System.Diagnostics.Process.Start("explorer.exe","/select,\""+d.FileName+"\"");}catch{}
+            } catch(Exception error){Program.Log("ERROR: could not save the logs: "+error.GetBaseException().Message);}
+        }
     }
 
     void OnBrowse(object sender,EventArgs e) {

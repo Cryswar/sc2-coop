@@ -58,6 +58,10 @@ repository or sent between PCs.
 2. Run `.\build.ps1` in PowerShell. It compiles `src\*.cs` with the C# compiler included in Windows (.NET Framework 4)
    and writes `out\SC2Coop\` and `out\SC2Coop.zip`.
 
+Releasing: set `Program.Version` (in `src\TrialLauncher.cs`) to the new version, build, then publish with
+`gh release create v<version> out\SC2Coop.zip`. Launchers compare their version with the newest release on GitHub and
+show an update button when one is newer.
+
 ## License
 
 MIT, see [LICENSE](LICENSE). Third-party:
