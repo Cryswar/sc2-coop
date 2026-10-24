@@ -1,0 +1,485 @@
+// Guest targeted commands. The guest's native world clicks are dropped, but its targeting UI still
+// works and is reported to triggers. The launcher's click bridge reads the state below from the guest's
+// local bank, and while targeting it sends the click as a queued Move probe (Patrol when shift is held).
+// One game loop later the probe is replaced by the pending ability at the probe's target; units that
+// cannot use the ability get their previous queue back without the probe.
+// The report carries one abilcmd, the active subgroup's. Every probed unit gets the command its own command card
+// gives for that button (CoopResolve, from catalog data only, so mod units work too), like the native per-unit
+// dispatch: e.g. A with marines and medics = attack for the marines, scan move (AcquireMove) for the medics.
+// The bridge may also send a probe before this report reaches it (it guesses targeting from the key, e.g. A). If no
+// targeting mode was on when the probe arrived, the probe is taken back the same way and counted as a stray.
+const int coopGuest = 6;
+const int coopProbeMax = 64;
+bool coopTargeting = false;
+abilcmd coopTargetCmd = null;
+int coopTargetSeq = 0;
+unit[coopProbeMax] coopProbeUnit;
+order[coopProbeMax] coopProbeOrder;
+bool[coopProbeMax] coopProbeInTargeting;
+order[coopProbeMax] coopProbeReal;
+bool[coopProbeMax] coopProbeExtra;
+int coopProbeCount = 0;
+bool coopProbeBusy = false;
+trigger coopProbeWork = null;
+trigger coopProbeTrigger = null;
+int coopProbeAbils = 0;
+int coopProbeSeen = 0;
+int coopProbeRestored = 0;
+int coopProbeIssued = 0;
+int coopProbeIssueFailed = 0;
+int coopProbeStray = 0;
+int coopProbeSingle = 0;
+int coopProbeExtraCount = 0;
+string coopProbeLast = "";
+string coopProbeFlags = "";
+// Resolution paths (CoopCandidates): 0 exact, 1 face, 2 alias, 3 hotkey, 4 uncarded, 5 none (queue restored).
+int[6] coopResolveCount;
+int coopResolvedPath = 5;
+string coopResolveUnresolved = "";
+// " a b " word sets: faces, hotkey aliases and hotkeys of the buttons that carry the event's command on the probed types.
+string coopEvtFaces = " ";
+string coopEvtKeys = " ";
+string coopEvtHotkeys = " ";
+bank coopBridgeBank = null;
+
+// The guest's local "CoopBridge" bank, shared with the camera report (campaign_guest_ui.galaxy).
+bank CoopBridgeBank() {
+    if (coopBridgeBank == null) { coopBridgeBank = BankLoad("CoopBridge", coopGuest); }
+    return coopBridgeBank;
+}
+
+void CoopTargetWrite() {
+    bank b = CoopBridgeBank();
+    BankValueSetFromInt(b, "Target", "seq", coopTargetSeq);
+    BankValueSetFromFlag(b, "Target", "on", coopTargeting);
+    if (coopTargetCmd != null) {
+        BankValueSetFromString(b, "Target", "abil", AbilityCommandGetAbility(coopTargetCmd));
+        BankValueSetFromInt(b, "Target", "cmd", AbilityCommandGetCommand(coopTargetCmd));
+    }
+    BankValueSetFromInt(b, "Probe", "seen", coopProbeSeen);
+    BankValueSetFromInt(b, "Probe", "restored", coopProbeRestored);
+    BankValueSetFromInt(b, "Probe", "issued", coopProbeIssued);
+    BankValueSetFromInt(b, "Probe", "issue_failed", coopProbeIssueFailed);
+    BankValueSetFromInt(b, "Probe", "stray", coopProbeStray);
+    BankValueSetFromInt(b, "Probe", "single", coopProbeSingle);
+    BankValueSetFromInt(b, "Probe", "move_abils", coopProbeAbils);
+    BankValueSetFromInt(b, "Probe", "extra", coopProbeExtraCount);
+    BankValueSetFromString(b, "Probe", "last", coopProbeLast);
+    BankValueSetFromString(b, "Probe", "flags", coopProbeFlags);
+    BankValueSetFromInt(b, "Resolve", "exact", coopResolveCount[0]);
+    BankValueSetFromInt(b, "Resolve", "face", coopResolveCount[1]);
+    BankValueSetFromInt(b, "Resolve", "alias", coopResolveCount[2]);
+    BankValueSetFromInt(b, "Resolve", "hotkey", coopResolveCount[3]);
+    BankValueSetFromInt(b, "Resolve", "uncarded", coopResolveCount[4]);
+    BankValueSetFromInt(b, "Resolve", "none", coopResolveCount[5]);
+    BankValueSetFromString(b, "Resolve", "unresolved", coopResolveUnresolved);
+    BankSave(b);
+}
+
+bool CoopTargetMode(bool testConditions, bool runActions) {
+    if (!runActions) { return true; }
+    coopTargeting = EventTargetModeState() == c_targetModeStateOn;
+    if (coopTargeting) { coopTargetCmd = EventTargetModeAbilCmd(); }
+    coopTargetSeq += 1;
+    CoopTargetWrite();
+    return true;
+}
+
+// Command names of an ability class in index order (Core TriggerLibs/GameData/Abil.galaxy, EAbil*Cmd). Numbered
+// names (Build1, Train3, Research12, ...) are handled in CoopCmdIndex.
+string CoopCmdNames(int cls) {
+    if (cls == c_classIdCAbilAttack) { return "Execute Towards Barrage"; }
+    if (cls == c_classIdCAbilBeacon) { return "Cancel Move"; }
+    if (cls == c_classIdCAbilBehavior) { return "On Off"; }
+    if (cls == c_classIdCAbilBuildable) { return "Cancel Halt"; }
+    if (cls == c_classIdCAbilEffectInstant || cls == c_classIdCAbilEffectTarget) { return "Execute Cancel"; }
+    if (cls == c_classIdCAbilHarvest) { return "Gather Return Cancel"; }
+    if (cls == c_classIdCAbilInteract) { return "Designate"; }
+    if (cls == c_classIdCAbilInventory) { return "Drop Move Take ItemInstant ItemTarget ItemCancel PawnInstant ItemTogOn ItemTogOff"; }
+    if (cls == c_classIdCAbilMerge) { return "SelectedUnits WithTarget"; }
+    if (cls == c_classIdCAbilMergeable || cls == c_classIdCAbilWarpable) { return "Cancel"; }
+    if (cls == c_classIdCAbilMorph || cls == c_classIdCAbilMorphPlacement) { return "Execute Cancel Unmorph"; }
+    if (cls == c_classIdCAbilMove) { return "Move Patrol HoldPos AcquireMove Turn"; }
+    if (cls == c_classIdCAbilQueue) { return "CancelLast CancelSlot"; }
+    if (cls == c_classIdCAbilStop) { return "Stop HoldFire Cheer Dance Tease RequestPickup"; }
+    if (cls == c_classIdCAbilTransport) { return "Load UnloadAll UnloadAt UnloadUnit LoadAll"; }
+    return "Execute";
+}
+
+// Index of a command name from a card's AbilCmd ("abil,Name"; data may also give the index itself), -1 if unknown.
+int CoopCmdIndex(string abil, string name) {
+    int len = StringLength(name);
+    int digits = 0;
+    int i = 1;
+    string names;
+    string w;
+    if (len == 0) { return -1; }
+    while (digits < len && StringFind("0123456789", StringSub(name, len - digits, len - digits), c_stringCase) != c_stringNotFound) { digits += 1; }
+    if (digits == len) { return StringToInt(name); }
+    if (digits > 0) {
+        if (StringSub(name, 1, len - digits) == "ReviveAtTarget") { return StringToInt(StringSub(name, len - digits + 1, len)) + 19; }
+        return StringToInt(StringSub(name, len - digits + 1, len)) - 1;
+    }
+    if (name == "Halt" && AbilityClass(abil) == c_classIdCAbilBuild) { return 30; }
+    names = CoopCmdNames(AbilityClass(abil));
+    while (true) {
+        w = StringWord(names, i);
+        if (w == "") { return -1; }
+        if (w == name) { return i - 1; }
+        i += 1;
+    }
+    return -1;
+}
+
+string CoopWordOr(string s, string empty) {
+    if (s == "") { return empty; }
+    return s;
+}
+
+// The command card of a unit type for a player, every page (submenus included), cached in the global data table:
+// "coopCard|<player>|<type>" = button count, "...|<i>" = "face alias hotkey abil cmd" (alias = HotkeyAlias, the face
+// itself when unset; hotkey = the Hotkey string link, "-" when unset). Buttons without a command (submenus) are left out.
+int CoopCardScan(int player, string type) {
+    string key = "coopCard|" + IntToString(player) + "|" + type;
+    int cards;
+    int c = 0;
+    int buttons;
+    int b;
+    int n = 0;
+    int comma;
+    int cmd;
+    string path;
+    string face;
+    string cmdText;
+    string abil;
+    string aliasName;
+    if (DataTableValueExists(true, key)) { return DataTableGetInt(true, key); }
+    cards = CatalogFieldValueCount(c_gameCatalogUnit, type, "CardLayouts", player);
+    while (c < cards) {
+        buttons = CatalogFieldValueCount(c_gameCatalogUnit, type, "CardLayouts[" + IntToString(c) + "].LayoutButtons", player);
+        b = 0;
+        while (b < buttons) {
+            path = "CardLayouts[" + IntToString(c) + "].LayoutButtons[" + IntToString(b) + "].";
+            b += 1;
+            face = CatalogFieldValueGet(c_gameCatalogUnit, type, path + "Face", player);
+            cmdText = CatalogFieldValueGet(c_gameCatalogUnit, type, path + "AbilCmd", player);
+            comma = StringFind(cmdText, ",", c_stringCase);
+            if (face == "" || comma == c_stringNotFound) { continue; }
+            abil = StringSub(cmdText, 1, comma - 1);
+            cmd = CoopCmdIndex(abil, StringSub(cmdText, comma + 1, StringLength(cmdText)));
+            if (abil == "" || cmd < 0 || AbilityClass(abil) < 0) { continue; }
+            aliasName = CatalogFieldValueGet(c_gameCatalogButton, face, "HotkeyAlias", player);
+            if (aliasName == "" || aliasName == "##id##") { aliasName = face; }
+            DataTableSetString(true, key + "|" + IntToString(n), face + " " + aliasName + " "
+                + CoopWordOr(CatalogFieldValueGet(c_gameCatalogButton, face, "Hotkey", player), "-") + " " + abil + " " + IntToString(cmd));
+            n += 1;
+        }
+        c += 1;
+    }
+    DataTableSetInt(true, key, n);
+    return n;
+}
+
+string CoopCardButton(int player, string type, int i) {
+    return DataTableGetString(true, "coopCard|" + IntToString(player) + "|" + type + "|" + IntToString(i));
+}
+
+bool CoopInSet(string set, string w) {
+    return StringFind(set, " " + w + " ", c_stringCase) != c_stringNotFound;
+}
+
+string CoopAddToSet(string set, string w) {
+    if (w == "-" || CoopInSet(set, w)) { return set; }
+    return set + w + " ";
+}
+
+// Adds the buttons of a unit type's card that carry the event's command to the event sets.
+void CoopEventButtons(int player, string type, string abil, int cmd) {
+    int n = CoopCardScan(player, type);
+    int i = 0;
+    string e;
+    while (i < n) {
+        e = CoopCardButton(player, type, i);
+        i += 1;
+        if (StringWord(e, 4) != abil || StringToInt(StringWord(e, 5)) != cmd) { continue; }
+        coopEvtFaces = CoopAddToSet(coopEvtFaces, StringWord(e, 1));
+        coopEvtKeys = CoopAddToSet(coopEvtKeys, StringWord(e, 2));
+        coopEvtHotkeys = CoopAddToSet(coopEvtHotkeys, StringWord(e, 3));
+    }
+}
+
+// Commands a unit type may use for the event's command, best first, as "path abil cmd" triples. First the card's buttons
+// that carry the command (path 0), an event face (1) or an event hotkey alias (2), in card order: the native card shows the
+// first one the unit can use in that slot (a medic's Attack button is unusable, its AcquireMove one is not; a Predator has
+// both and attacks). Then buttons with an event hotkey string (3), then the command itself although not on the card (4).
+// Cached per type, command and event sets.
+string CoopCandidates(int player, string type, string abil, int cmd) {
+    string key = "coopRes|" + IntToString(player) + "|" + type + "|" + abil + "|" + IntToString(cmd) + "|" + coopEvtFaces + "|" + coopEvtKeys + "|" + coopEvtHotkeys;
+    int n;
+    int i = 0;
+    string e;
+    string own;
+    bool carded = false;
+    string matched = "";
+    string hotkey = "";
+    if (DataTableValueExists(true, key)) { return DataTableGetString(true, key); }
+    n = CoopCardScan(player, type);
+    while (i < n) {
+        e = CoopCardButton(player, type, i);
+        i += 1;
+        own = StringWord(e, 4) + " " + StringWord(e, 5) + " ";
+        if (StringWord(e, 4) == abil && StringToInt(StringWord(e, 5)) == cmd) { matched = matched + "0 " + own; carded = true; }
+        else if (CoopInSet(coopEvtFaces, StringWord(e, 1))) { matched = matched + "1 " + own; }
+        else if (CoopInSet(coopEvtKeys, StringWord(e, 2))) { matched = matched + "2 " + own; }
+        else if (StringWord(e, 3) != "-" && CoopInSet(coopEvtHotkeys, StringWord(e, 3))) { hotkey = hotkey + "3 " + own; }
+    }
+    if (!carded) { hotkey = hotkey + "4 " + abil + " " + IntToString(cmd) + " "; }
+    e = matched + hotkey;
+    DataTableSetString(true, key, e);
+    return e;
+}
+
+// The real order for a probed unit: at the probe's target unit, else its point; unit-only commands (Gather, Repair)
+// whose point order is invalid (Move probes don't snap to every unit, e.g. mineral fields) take the unit nearest the point.
+order CoopRealOrder(unit u, abilcmd cmd, order probe) {
+    order real;
+    unit target;
+    if (OrderGetTargetType(probe) == c_orderTargetUnit && OrderGetTargetUnit(probe) != null) { return OrderTargetingUnit(cmd, OrderGetTargetUnit(probe)); }
+    real = OrderTargetingPoint(cmd, OrderGetTargetPosition(probe));
+    if (!UnitOrderIsValid(u, real)) {
+        target = UnitGroupClosestToPoint(UnitGroup(null, c_playerAny, RegionCircle(OrderGetTargetPosition(probe), 1.25),
+            UnitFilter(0, 0, 0, 0), 0), OrderGetTargetPosition(probe));
+        if (target != null) { real = OrderTargetingUnit(cmd, target); }
+    }
+    return real;
+}
+
+// The first candidate the unit can use with a valid order (else the first it has, enabled, at all); null = none.
+// Sets coopResolvedPath.
+order CoopResolve(unit u, order probe, string abil, int cmd) {
+    string cands = CoopCandidates(UnitGetOwner(u), UnitGetType(u), abil, cmd);
+    int i = 1;
+    string a;
+    order real;
+    order fallback = null;
+    int fallbackPath = 5;
+    while (StringWord(cands, i) != "") {
+        a = StringWord(cands, i + 1);
+        if (UnitAbilityCheck(u, a, true)) {
+            real = CoopRealOrder(u, AbilityCommand(a, StringToInt(StringWord(cands, i + 2))), probe);
+            if (UnitOrderIsValid(u, real)) { coopResolvedPath = StringToInt(StringWord(cands, i)); return real; }
+            if (fallback == null) { fallback = real; fallbackPath = StringToInt(StringWord(cands, i)); }
+        }
+        i += 3;
+    }
+    coopResolvedPath = fallbackPath;
+    return fallback;
+}
+
+// Abilities the native UI casts with one unit of the selection: Build, and those with the BestUnit flag (effect-target
+// spells, morph placement, train, research). Cached per ability.
+bool CoopSingleCaster(int player, string abil) {
+    string key = "coopOne|" + abil;
+    bool one;
+    if (DataTableValueExists(true, key)) { return DataTableGetBool(true, key); }
+    one = AbilityClass(abil) == c_classIdCAbilBuild || CatalogFieldValueGet(c_gameCatalogAbil, abil, "Flags[BestUnit]", player) == "1";
+    DataTableSetBool(true, key, one);
+    return one;
+}
+
+bool CoopIsProbe(order candidate, order probe) {
+    abilcmd a = OrderGetAbilityCommand(candidate);
+    abilcmd b = OrderGetAbilityCommand(probe);
+    return AbilityCommandGetAbility(a) == AbilityCommandGetAbility(b)
+        && AbilityCommandGetCommand(a) == AbilityCommandGetCommand(b)
+        && DistanceBetweenPoints(OrderGetTargetPosition(candidate), OrderGetTargetPosition(probe)) < 0.05;
+}
+
+void CoopRestoreQueue(unit u, order probe) {
+    order[16] keep;
+    int kept = 0;
+    int i = 0;
+    int count = UnitOrderCount(u);
+    while (i < count && kept < 16) {
+        if (!CoopIsProbe(UnitOrder(u, i), probe)) { keep[kept] = UnitOrder(u, i); kept += 1; }
+        i += 1;
+    }
+    if (kept == 0) { UnitIssueOrder(u, Order(AbilityCommand("stop", 0)), c_orderQueueReplace); return; }
+    UnitIssueOrder(u, keep[0], c_orderQueueReplace);
+    i = 1;
+    while (i < kept) { UnitIssueOrder(u, keep[i], c_orderQueueAddToEnd); i += 1; }
+}
+
+// Takes the probe back out of a probed unit's queue; selected units the probe never reached have nothing to take back.
+void CoopTakeBack(int i) {
+    if (!coopProbeExtra[i]) { CoopRestoreQueue(coopProbeUnit[i], coopProbeOrder[i]); }
+}
+
+bool CoopProbeProcess(bool testConditions, bool runActions) {
+    int i = 0;
+    unitgroup selected;
+    int j;
+    int best;
+    unit u;
+    order probe;
+    order real;
+    int queue;
+    string abil = "";
+    int cmd = 0;
+    string a;
+    if (!runActions) { return true; }
+    Wait(0.0, c_timeGame);
+    // Orders re-issued below raise order events again; they are not probes.
+    coopProbeBusy = true;
+    if (coopTargetCmd != null) { abil = AbilityCommandGetAbility(coopTargetCmd); cmd = AbilityCommandGetCommand(coopTargetCmd); }
+    // The API's Move probe (move,0) only reaches units that have "move"; mod units with their own move ability
+    // (BattlecruiserMove, ...) are skipped by it. Every other unit of the guest's selection is handled like a probed one,
+    // at the first probe's target.
+    if (coopProbeCount > 0 && coopProbeInTargeting[0]) {
+        selected = UnitGroupSelected(coopGuest);
+        j = 1;
+        while (j <= UnitGroupCount(selected, c_unitCountAll) && coopProbeCount < coopProbeMax) {
+            u = UnitGroupUnit(selected, j);
+            j += 1;
+            i = 0;
+            while (i < coopProbeCount && coopProbeUnit[i] != u) { i += 1; }
+            if (i < coopProbeCount) { continue; }
+            coopProbeUnit[coopProbeCount] = u;
+            coopProbeOrder[coopProbeCount] = coopProbeOrder[0];
+            coopProbeInTargeting[coopProbeCount] = true;
+            coopProbeExtra[coopProbeCount] = true;
+            coopProbeCount += 1;
+            coopProbeExtraCount += 1;
+        }
+        i = 0;
+    }
+    // The buttons that carry the command on the probed types (the active subgroup's type is one of them).
+    coopEvtFaces = " ";
+    coopEvtKeys = " ";
+    coopEvtHotkeys = " ";
+    while (i < coopProbeCount && abil != "") {
+        if (UnitIsAlive(coopProbeUnit[i])) { CoopEventButtons(UnitGetOwner(coopProbeUnit[i]), UnitGetType(coopProbeUnit[i]), abil, cmd); }
+        i += 1;
+    }
+    // Each unit's own order, or null: dead, stray, or nothing on its card for the button.
+    i = 0;
+    while (i < coopProbeCount) {
+        u = coopProbeUnit[i];
+        coopProbeReal[i] = null;
+        i += 1;
+        if (!UnitIsAlive(u)) { continue; }
+        if (!coopProbeInTargeting[i - 1]) {
+            CoopTakeBack(i - 1);
+            coopProbeStray += 1;
+            continue;
+        }
+        coopResolvedPath = 5;
+        if (abil != "") { coopProbeReal[i - 1] = CoopResolve(u, coopProbeOrder[i - 1], abil, cmd); }
+        coopResolveCount[coopResolvedPath] += 1;
+        if (coopProbeReal[i - 1] == null) {
+            coopResolveUnresolved = UnitGetType(u) + " " + abil + " " + IntToString(cmd);
+            CoopTakeBack(i - 1);
+            coopProbeRestored += 1;
+        }
+    }
+    // Single-caster abilities go to the probed unit closest to the target only, the others get their queue back.
+    i = 0;
+    while (i < coopProbeCount) {
+        if (coopProbeReal[i] != null && CoopSingleCaster(UnitGetOwner(coopProbeUnit[i]), AbilityCommandGetAbility(OrderGetAbilityCommand(coopProbeReal[i])))) {
+            a = AbilityCommandGetAbility(OrderGetAbilityCommand(coopProbeReal[i]));
+            best = i;
+            j = i + 1;
+            while (j < coopProbeCount) {
+                if (coopProbeReal[j] != null && AbilityCommandGetAbility(OrderGetAbilityCommand(coopProbeReal[j])) == a) {
+                    if (DistanceBetweenPoints(UnitGetPosition(coopProbeUnit[j]), OrderGetTargetPosition(coopProbeOrder[j]))
+                        < DistanceBetweenPoints(UnitGetPosition(coopProbeUnit[best]), OrderGetTargetPosition(coopProbeOrder[best]))) {
+                        best = j;
+                    }
+                }
+                j += 1;
+            }
+            j = i;
+            while (j < coopProbeCount) {
+                if (j != best && coopProbeReal[j] != null && AbilityCommandGetAbility(OrderGetAbilityCommand(coopProbeReal[j])) == a) {
+                    CoopTakeBack(j);
+                    coopProbeReal[j] = null;
+                    coopProbeSingle += 1;
+                }
+                j += 1;
+            }
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < coopProbeCount) {
+        u = coopProbeUnit[i];
+        probe = coopProbeOrder[i];
+        real = coopProbeReal[i];
+        i += 1;
+        if (real == null) { continue; }
+        // Patrol probe = shift held: queue the real order instead of replacing.
+        queue = c_orderQueueReplace;
+        if (AbilityCommandGetCommand(OrderGetAbilityCommand(probe)) == 1) { queue = c_orderQueueAddToEnd; }
+        CoopTakeBack(i - 1);
+        if (UnitIssueOrder(u, real, queue)) { coopProbeIssued += 1; } else { coopProbeIssueFailed += 1; }
+        coopProbeLast = UnitGetType(u) + " " + AbilityCommandGetAbility(OrderGetAbilityCommand(real)) + " " + IntToString(AbilityCommandGetCommand(OrderGetAbilityCommand(real)))
+            + " at " + FixedToString(PointGetX(OrderGetTargetPosition(probe)), 1) + "," + FixedToString(PointGetY(OrderGetTargetPosition(probe)), 1)
+            + " orders now " + IntToString(UnitOrderCount(u));
+    }
+    i = 0;
+    while (i < coopProbeCount) { coopProbeExtra[i] = false; i += 1; }
+    coopProbeBusy = false;
+    coopProbeCount = 0;
+    CoopTargetWrite();
+    return true;
+}
+
+bool CoopProbe(bool testConditions, bool runActions) {
+    order probe = EventUnitOrder();
+    if (!runActions) { return true; }
+    if (OrderGetPlayer(probe) != coopGuest || coopProbeBusy || coopProbeCount >= coopProbeMax) { return true; }
+    // Diagnostics: flags of the last guest move/patrol order (smart, queued, user).
+    coopProbeFlags = "smart " + IntToString(BoolToInt(OrderGetFlag(probe, c_cmdSmartClick))) + " queued " + IntToString(BoolToInt(OrderGetFlag(probe, c_cmdQueued)))
+        + " user " + IntToString(BoolToInt(OrderGetFlag(probe, c_cmdUser))) + " targeting " + IntToString(BoolToInt(coopTargeting));
+    // Right-clicks (smart) on the ground also arrive as move orders; the bridge's probes are plain Move/Patrol.
+    if (OrderGetFlag(probe, c_cmdSmartClick)) { return true; }
+    coopProbeSeen += 1;
+    coopProbeUnit[coopProbeCount] = EventUnit();
+    coopProbeOrder[coopProbeCount] = probe;
+    coopProbeInTargeting[coopProbeCount] = coopTargeting;
+    coopProbeCount += 1;
+    if (coopProbeCount == 1) { TriggerExecute(coopProbeWork, false, false); }
+    return true;
+}
+
+// Units of mods may move with their own move-class ability (BattlecruiserMove, DiamondbackMove); the bridge's Move/Patrol
+// probe then arrives as that ability's Move (0) or Patrol (1) command. Listens to those too (catalog walk, once at start).
+bool CoopProbeRegister(bool testConditions, bool runActions) {
+    int i = 0;
+    int count = CatalogEntryCount(c_gameCatalogAbil);
+    string abil;
+    if (!runActions) { return true; }
+    while (i < count) {
+        abil = CatalogEntryGet(c_gameCatalogAbil, i);
+        i += 1;
+        if (abil != "move" && CatalogEntryIsValid(c_gameCatalogAbil, abil) && AbilityClass(abil) == c_classIdCAbilMove) {
+            TriggerAddEventUnitOrder(coopProbeTrigger, null, AbilityCommand(abil, 0));
+            TriggerAddEventUnitOrder(coopProbeTrigger, null, AbilityCommand(abil, 1));
+            coopProbeAbils += 1;
+        }
+        if (i % 250 == 0) { Wait(0.0, c_timeGame); }
+    }
+    CoopTargetWrite();
+    return true;
+}
+
+void CoopTargetingInit() {
+    trigger mode = TriggerCreate("CoopTargetMode");
+    coopProbeTrigger = TriggerCreate("CoopProbe");
+    coopProbeWork = TriggerCreate("CoopProbeProcess");
+    TriggerAddEventTargetModeUpdate(mode, coopGuest, null, c_targetModeStateAny);
+    TriggerAddEventUnitOrder(coopProbeTrigger, null, AbilityCommand("move", 0));
+    TriggerAddEventUnitOrder(coopProbeTrigger, null, AbilityCommand("move", 1));
+    TriggerExecute(TriggerCreate("CoopProbeRegister"), false, false);
+    CoopTargetWrite();
+}

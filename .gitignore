@@ -1,0 +1,5 @@
+# Build output and third-party binaries (shipped in release zips, not in the repository)
+/out/
+/lib/
+*.exe
+*.dll

@@ -1,0 +1,79 @@
+// The guest gets player 1's relationship with another player, both ways, for one alliance id.
+void CoopCopyAlliance(int id, int other) {
+    PlayerSetAlliance(6, id, other, PlayerGetAlliance(1, id, other));
+    PlayerSetAlliance(other, id, 6, PlayerGetAlliance(other, id, 1));
+}
+
+// Called after the original mission establishes its faction relationships (and again every second, as missions change
+// them). Everything except control and spending: hostility, but also vision, so AI allies who share their vision with
+// player 1 (e.g. an AI Raynor) share it with the guest too; and help, chat, defeat, pushing.
+void CoopSharedControlInit() {
+    int other = 0;
+    while (other < 16) {
+        if (other != 6 && other != 1) {
+            CoopCopyAlliance(c_allianceIdPassive, other);
+            CoopCopyAlliance(c_allianceIdVision, other);
+            CoopCopyAlliance(c_allianceIdTrade, other);
+            CoopCopyAlliance(c_allianceIdSeekHelp, other);
+            CoopCopyAlliance(c_allianceIdGiveHelp, other);
+            CoopCopyAlliance(c_allianceIdChat, other);
+            CoopCopyAlliance(c_allianceIdDefeat, other);
+            CoopCopyAlliance(c_allianceIdPushable, other);
+        }
+        other += 1;
+    }
+    libNtve_gf_SetAlliance(1, 6,
+        libNtve_ge_AllianceSetting_AllyWithSharedVisionControlAndSpending);
+}
+
+// One-time UI setup after the stock intro exits cinematic mode.
+void CoopSharedControlUiInit() {
+    int command = 0;
+    int selection = 0;
+    while (command <= 6) {
+        UISetCommandAllowed(PlayerGroupSingle(6), command, true);
+        command += 1;
+    }
+    UISetDragSelectEnabled(PlayerGroupSingle(6), true);
+    while (selection <= c_localSelectionTypeArmyButton) {
+        UISetSelectionTypeEnabled(PlayerGroupAll(), selection, true);
+        selection += 1;
+    }
+    PlayerSetRace(6, PlayerRace(1));
+    UnitSelect(UnitGroupUnit(UnitGroup("CommandCenter", 1, RegionEntireMap(),
+        UnitFilter(0, 0, 0, 0), 0), 1), 6, true);
+}
+
+// The SC2 API declares an API game over (for every client, while the simulation keeps running) as soon as an
+// objective is completed or failed, whether by ObjectiveSetState or by ObjectiveCreate in that state (observed
+// 2026-10-17: rebel bonus objective, results all victory/defeat; mission victory). The host plays on with native
+// input, but the guest's click bridge (API) is refused from then on. BuildMap routes every objective state call in
+// the stock script here: completed/failed stays active in the engine, the name shows the outcome, and reads return
+// the recorded state so the mission logic sees the real one.
+int[64] coopObjectiveStates;
+text[64] coopObjectiveNames;
+bool[64] coopObjectiveRecorded;
+
+int CoopObjectiveGetState(int objective) {
+    if (objective >= 0 && objective < 64 && coopObjectiveRecorded[objective]) { return coopObjectiveStates[objective]; }
+    return ObjectiveGetState(objective);
+}
+
+void CoopObjectiveSetState(int objective, int state) {
+    if (objective < 0 || objective >= 64) { ObjectiveSetState(objective, state); return; }
+    if (!coopObjectiveRecorded[objective]) { coopObjectiveNames[objective] = ObjectiveGetName(objective); }
+    coopObjectiveRecorded[objective] = true;
+    coopObjectiveStates[objective] = state;
+    if (state == c_objectiveStateCompleted) {
+        coopObjectiveOutcomes += 1;
+        ObjectiveSetName(objective, coopObjectiveNames[objective] + StringToText(" (Completed)"));
+    }
+    else if (state == c_objectiveStateFailed) {
+        coopObjectiveOutcomes += 1;
+        ObjectiveSetName(objective, coopObjectiveNames[objective] + StringToText(" (Failed)"));
+    }
+    else {
+        ObjectiveSetName(objective, coopObjectiveNames[objective]);
+        ObjectiveSetState(objective, state);
+    }
+}

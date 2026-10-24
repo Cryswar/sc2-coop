@@ -1,0 +1,72 @@
+// Test-only observations. No campaign state is changed here.
+int coopDiagnosticTicks = 0;
+int[17] coopMouseClicks;
+int[17] coopSelections;
+int[17] coopMouseX;
+int[17] coopMouseY;
+
+bool CoopMouseDiagnostic(bool testConditions, bool runActions) {
+    int player = EventPlayer();
+    if (!runActions) { return true; }
+    coopMouseClicks[player] += 1;
+    coopMouseX[player] = EventMouseClickedPosXUI();
+    coopMouseY[player] = EventMouseClickedPosYUI();
+    return true;
+}
+
+bool CoopSelectionDiagnostic(bool testConditions, bool runActions) {
+    if (!runActions) { return true; }
+    coopSelections[EventPlayer()] += 1;
+    return true;
+}
+
+void CoopWriteDiagnostics(int player) {
+    bank output = BankLoad("CoopCampaignProbe", player);
+    BankValueSetFromInt(output, "State", "ticks", coopDiagnosticTicks);
+    BankValueSetFromInt(output, "Input", "mouse_events", coopMouseClicks[player]);
+    BankValueSetFromInt(output, "Input", "selection_events", coopSelections[player]);
+    BankValueSetFromInt(output, "Input", "last_mouse_x", coopMouseX[player]);
+    BankValueSetFromInt(output, "Input", "last_mouse_y", coopMouseY[player]);
+    BankValueSetFromInt(output, "Input", "selected_count", UnitGroupCount(UnitGroupSelected(player), c_unitCountAll));
+    BankValueSetFromInt(output, "State", "objective_id", gv_objectiveDominionBase);
+    BankValueSetFromInt(output, "State", "objective_state", CoopObjectiveGetState(gv_objectiveDominionBase));
+    BankValueSetFromInt(output, "State", "rebel_objective_id", gv_objectiveRebels);
+    BankValueSetFromInt(output, "State", "rebel_objective_state", CoopObjectiveGetState(gv_objectiveRebels));
+    BankValueSetFromFlag(output, "State", "game_over", gv_gameOver);
+    BankValueSetFromFlag(output, "State", "in_cinematic", gv_inCinematic);
+    BankValueSetFromInt(output, "State", "ai_starts", TriggerGetExecCount(gt_StartAI));
+    BankValueSetFromInt(output, "State", "wave_trigger_calls", TriggerGetExecCount(gt_DominionAttackWaves));
+    BankValueSetFromInt(output, "State", "wave_send_returns", coopWaveSendReturns);
+    BankValueSetFromInt(output, "State", "patrol_trigger_calls", TriggerGetExecCount(gt_DominionAttackerSquads));
+    BankValueSetFromInt(output, "State", "difficulty", PlayerDifficulty(1));
+    BankValueSetFromFlag(output, "State", "host_enemy2", !PlayerGetAlliance(1, c_allianceIdPassive, 2));
+    BankValueSetFromFlag(output, "State", "guest_enemy2", !PlayerGetAlliance(6, c_allianceIdPassive, 2));
+    BankValueSetFromFlag(output, "State", "guest_control", PlayerGetAlliance(1, c_allianceIdControl, 6));
+    BankValueSetFromFlag(output, "State", "guest_spending", PlayerGetAlliance(1, c_allianceIdSpend, 6));
+    BankValueSetFromInt(output, "State", "objective_outcomes", coopObjectiveOutcomes);
+    BankValueSetFromInt(output, "GuestUi", "pings", coopGuestPings);
+    BankValueSetFromString(output, "GuestUi", "last_ping", coopGuestPingLast);
+    BankValueSetFromInt(output, "GuestUi", "cam_keys", coopGuestCamKeys);
+    BankValueSetFromString(output, "GuestUi", "guest_camera", FixedToString(PointGetX(CameraGetTarget(6)), 1) + "," + FixedToString(PointGetY(CameraGetTarget(6)), 1));
+    BankValueSetFromInt(output, "GuestUi", "p1_minerals", PlayerGetPropertyInt(1, c_playerPropMinerals));
+    BankValueSetFromInt(output, "GuestUi", "p6_minerals", PlayerGetPropertyInt(6, c_playerPropMinerals));
+    BankSave(output);
+}
+
+bool CoopDiagnostics(bool testConditions, bool runActions) {
+    if (!runActions) { return true; }
+    coopDiagnosticTicks += 1;
+    CoopWriteDiagnostics(1);
+    if (PlayerType(6) == c_playerTypeUser) { CoopWriteDiagnostics(6); }
+    return true;
+}
+
+void CoopDiagnosticsInit() {
+    trigger observer = TriggerCreate("CoopDiagnostics");
+    trigger mouse = TriggerCreate("CoopMouseDiagnostic");
+    trigger selection = TriggerCreate("CoopSelectionDiagnostic");
+    TriggerAddEventTimePeriodic(observer, 1.0, c_timeGame);
+    TriggerAddEventMouseClicked(mouse, c_playerAny, c_mouseButtonLeft, true);
+    TriggerAddEventMouseClicked(mouse, c_playerAny, c_mouseButtonRight, true);
+    TriggerAddEventUnitSelected(selection, null, c_playerAny, true);
+}

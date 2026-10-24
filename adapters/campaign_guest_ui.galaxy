@@ -1,0 +1,317 @@
+// Guest UI gaps (player 6 shares player 1's units and spending but is its own player).
+//
+// Resources: player 6's own native panel shows player 1's minerals, vespene and supply: the map copies them into player 6's
+// properties every 0.125 game s. That is display only: the costs of player 1's units are paid by player 1 (observed
+// 2026-10-21: the guest trained two marines at player 1's barracks, player 1 went 100 -> 0), so player 6's copy is never spent.
+//
+// Pings (both players): the guest's world clicks are dropped, Alt+clicks included, but its minimap clicks are not. The
+// launcher's click bridge turns a guest world Alt+click into a minimap click at the same world point, so the guest's pings
+// are native ping events. As Liberty's ping panel does (libLbty_gf_EnableDisablePingPanel, not called here because Kit
+// missions may not include LibertyLib, and a missing library breaks the whole map script), native pings of both players
+// are hidden, the ping panel frame is shown, and CoopPingEvent draws every ping for the pinging player and its allies, by
+// type (EventPingOption: 0 attack, 1 on my way, 2 retreat, 3 defend). The guest's native ping panel (hold Alt) isn't shown
+// either, so the bridge draws its own and sends the chosen type as 1-4 Scroll Lock presses just before the minimap click.
+// coopGuestPings/coopGuestPingLast are declared in BuildMap's script header so campaign_diagnostics.galaxy can report them.
+const int coopUiGuest = 6;
+const int coopUiOwner = 1;
+// The players' chosen colors as 0xRRGGBB (set by BuildMission; -1 = the map's own color).
+const int coopUiOwnerRgb = -1;
+const int coopUiGuestRgb = -1;
+int[5] coopResProps;
+int coopViewOfGuest = c_invalidPingId;   // shown to the host
+int coopViewOfHost = c_invalidPingId;    // shown to the guest
+
+// A player's color for pings and the ally view frame: the launcher's RGB when the player picked one (custom colors and
+// the campaign's changed ones are outside libNtve's 16-color table), else the current color index converted.
+color CoopUiPlayerColor(int player) {
+    int rgb = -1;
+    if (player == coopUiOwner) { rgb = coopUiOwnerRgb; }
+    else if (player == coopUiGuest) { rgb = coopUiGuestRgb; }
+    if (rgb < 0) { return libNtve_gf_ConvertPlayerColorToColor(PlayerGetColorIndex(player, false)); }
+    return Color(IntToFixed(rgb / 65536) * 100.0 / 255.0, IntToFixed((rgb / 256) % 256) * 100.0 / 255.0, IntToFixed(rgb % 256) * 100.0 / 255.0);
+}
+
+bool CoopResUpdate(bool testConditions, bool runActions) {
+    int i = 0;
+    int v;
+    if (!runActions) { return true; }
+    while (i < 5) {
+        v = PlayerGetPropertyInt(coopUiOwner, coopResProps[i]);
+        if (PlayerGetPropertyInt(coopUiGuest, coopResProps[i]) != v) { PlayerModifyPropertyInt(coopUiGuest, coopResProps[i], c_playerPropOperSetTo, v); }
+        i += 1;
+    }
+    return true;
+}
+
+playergroup CoopPingPlayers() {
+    playergroup g = PlayerGroupEmpty();
+    PlayerGroupAdd(g, coopUiOwner);
+    PlayerGroupAdd(g, coopUiGuest);
+    return g;
+}
+
+fixed[17] coopPingLastTime;
+int coopPingTypeKeys = 0;
+fixed coopPingTypeTime = -10.0;
+
+bool CoopPingTypeKey(bool testConditions, bool runActions) {
+    if (!runActions) { return true; }
+    coopPingTypeKeys += 1;
+    coopPingTypeTime = GameGetMissionTime();
+    return true;
+}
+
+bool CoopPingEvent(bool testConditions, bool runActions) {
+    int player = EventPlayer();
+    int option = EventPingOption();
+    int owner = 0;
+    point at = EventPingPoint();
+    playergroup players;
+    string model = "MinimapPing";
+    string beacon = "";
+    string soundId = "UI_MiniMapPing";
+    string label = "";
+    fixed scale = 1.0;
+    actor ground;
+    bank reply;
+    if (!runActions) { return true; }
+    if ((player != coopUiOwner && player != coopUiGuest) || option == 4) { return true; }
+    // A guest ping right after 1-4 Scroll Lock presses has the type the bridge's panel picked.
+    if (player == coopUiGuest) {
+        if (option < 0 && coopPingTypeKeys > 0 && GameGetMissionTime() - coopPingTypeTime < 2.0) { option = MinI(coopPingTypeKeys, 4) - 1; }
+        coopPingTypeKeys = 0;
+    }
+    // One ping per player per 0.25 game s (Liberty's panel has a similar guard).
+    if (GameGetMissionTime() - coopPingLastTime[player] < 0.25) { return true; }
+    coopPingLastTime[player] = GameGetMissionTime();
+    // A plain ping on a unit: an enemy's is an attack ping, a friendly one a defend ping (as in Liberty).
+    if (option < 0 && EventPingUnitType() != null && EventPingUnitControlPlayer() > 0) {
+        owner = EventPingUnitControlPlayer();
+        at = EventPingUnitPosition();
+        option = 3;
+        if (!PlayerGetAlliance(player, c_allianceIdPassive, owner) && owner != player) { option = 0; }
+    }
+    if (option == 0) { model = "PingPanelPingAttack"; beacon = "PingPanelBeaconAttack"; soundId = "UI_PingAdvanced_Attack"; label = " wants to attack!"; }
+    else if (option == 1) { model = "PingPanelPingOnMyWay"; beacon = "PingPanelBeaconOnMyWay"; soundId = "UI_PingAdvanced_OnMyWay"; label = " is on the way!"; }
+    else if (option == 2) { model = "PingPanelPingRetreat"; beacon = "PingPanelBeaconRetreat"; soundId = "UI_PingAdvanced_Retreat"; label = " signals to retreat!"; }
+    else if (option == 3) { model = "PingPanelPingDefend"; beacon = "PingPanelBeaconDefend"; soundId = "UI_PingAdvanced_Defend"; label = " wants to defend!"; }
+    if (label != "") { scale = 0.6; }
+    players = PlayerGroupAlliance(c_playerGroupAlly, player);
+    PlayerGroupAdd(players, player);
+    if (beacon != "") { PlayerCreateEffectPoint(player, beacon, at); }
+    PingCreate(players, model, at, CoopUiPlayerColor(player), 5.0);
+    PingSetRotation(PingLastCreated(), 270.0);
+    PingSetScale(PingLastCreated(), scale);
+    PingSetTooltip(PingLastCreated(), PlayerName(player));
+    SoundPlayForPlayer(SoundLink(soundId, -1), c_maxPlayers, players, 100.0, 0.0);
+    // "Name wants to attack!", the name in the player's color.
+    if (label != "") { UIDisplayMessage(players, c_messageAreaChat, TextWithColor(PlayerName(player), CoopUiPlayerColor(player)) + StringToText(label)); }
+    if (player == coopUiGuest) {
+        coopGuestPings += 1;
+        coopGuestPingLast = "option " + IntToString(option) + " at " + FixedToString(PointGetX(at), 1) + "," + FixedToString(PointGetY(at), 1);
+        // Where the ping landed, for the bridge's minimap offset correction.
+        reply = CoopBridgeBank();
+        BankValueSetFromInt(reply, "Ping", "seq", coopGuestPings);
+        BankValueSetFromFixed(reply, "Ping", "x", PointGetX(EventPingPoint()));
+        BankValueSetFromFixed(reply, "Ping", "y", PointGetY(EventPingPoint()));
+        BankSave(reply);
+    }
+    // A plain ping also marks the ground, like the native one (Core model "MinimapPing" = Assets\UI\Feedback\Ping\Ping.m3).
+    if (label == "") {
+        libNtve_gf_CreateModelAtPoint("MinimapPing", at);
+        ground = libNtve_gf_ActorLastCreated();
+        Wait(4.0, c_timeGame);
+        libNtve_gf_KillModel(ground);
+    }
+    return true;
+}
+
+// Once a game second outside cinematics: the ping panel frame shown again. Some missions' UI changes (the cinematic mode
+// and UI filters at the start of UED's TRaynor01) set the frames back to the campaign default, without the ping panel
+// (2026-10-23: the first mission had plain pings only).
+bool CoopPingKeep(bool testConditions, bool runActions) {
+    if (!runActions || gv_inCinematic) { return true; }
+    PingSetPlayerPingsShown(CoopPingPlayers(), false);
+    UISetFrameVisible(CoopPingPlayers(), c_syncFrameTypePingPanel, true);
+    return true;
+}
+
+void CoopPingInit() {
+    PingSetPlayerPingsShown(CoopPingPlayers(), false);
+    UISetFrameVisible(CoopPingPlayers(), c_syncFrameTypePingPanel, true);
+    TriggerAddEventTimePeriodic(TriggerCreate("CoopPingKeep"), 1.0, c_timeGame);
+    TriggerAddEventPing(TriggerCreate("CoopPingEvent"), c_playerAny);
+    TriggerAddEventKeyPressed(TriggerCreate("CoopPingTypeKey"), coopUiGuest, c_keyScrollLock, true, c_keyModifierStateIgnore, c_keyModifierStateIgnore, c_keyModifierStateIgnore);
+}
+
+// Ally view on the minimap (as in a Wings of Liberty+ mod): each player sees the other's camera as a frame on the
+// minimap. "PingViewArea" is Liberty's Hud_FOV model; BuildMap adds its model entry to the map. Alt+V jumps to the ally's view.
+// The frame takes the ping color. It looked fixed blue (2026-10-21) because the frames were created before the launcher's
+// PlayerSetColorIndex calls ran; now the colors are set first (BuildMission) and passed as RGB (2026-10-22 test: four
+// frames made with PingCreate / PingCreateWithPlayerId / PingSetUseUnitTeamColor all showed the guest's color).
+bool CoopViewMoved(bool testConditions, bool runActions) {
+    if (!runActions) { return true; }
+    if (EventPlayer() == coopUiGuest) { PingSetPosition(coopViewOfGuest, CameraGetTarget(coopUiGuest)); }
+    else { PingSetPosition(coopViewOfHost, CameraGetTarget(coopUiOwner)); }
+    return true;
+}
+
+bool CoopViewJump(bool testConditions, bool runActions) {
+    int ally = coopUiOwner;
+    if (!runActions) { return true; }
+    if (EventPlayer() == coopUiOwner) { ally = coopUiGuest; }
+    else if (EventPlayer() != coopUiGuest) { return true; }
+    CameraPan(EventPlayer(), CameraGetTarget(ally), 0.0, -1.0, 10.0, false);
+    return true;
+}
+
+int CoopViewPing(int viewer, int watched, fixed scale) {
+    int p = PingCreate(PlayerGroupSingle(viewer), "PingViewArea", CameraGetTarget(watched),
+        CoopUiPlayerColor(watched), 0.0);
+    PingSetRotation(p, 270.0);
+    PingSetScale(p, scale);
+    return p;
+}
+
+void CoopAllyViewInit() {
+    trigger moved = TriggerCreate("CoopViewMoved");
+    trigger jump = TriggerCreate("CoopViewJump");
+    region r = RegionPlayableMap();
+    // Your mod's scale: 0.5 on a 108-unit map, inversely with the map's larger side.
+    fixed scale = 0.5 * 108.0 / MaxF(PointGetX(RegionGetBoundsMax(r)) - PointGetX(RegionGetBoundsMin(r)),
+        PointGetY(RegionGetBoundsMax(r)) - PointGetY(RegionGetBoundsMin(r)));
+    coopViewOfGuest = CoopViewPing(coopUiOwner, coopUiGuest, scale);
+    coopViewOfHost = CoopViewPing(coopUiGuest, coopUiOwner, scale);
+    TriggerAddEventCameraMove(moved, coopUiOwner, c_cameraMoveReasonAny);
+    TriggerAddEventCameraMove(moved, coopUiGuest, c_cameraMoveReasonAny);
+    TriggerAddEventKeyPressed(jump, c_playerAny, c_keyV, true, c_keyModifierStateExclude, c_keyModifierStateExclude, c_keyModifierStateRequire);
+}
+
+// Keyboard camera: the guest's native arrow-key scrolling is dropped (like its world clicks), but its key events
+// still reach triggers. While arrows are held, the map pans player 6's camera itself. This is the fallback: normally the
+// click bridge scrolls and swallows the keys (see CoopCamReport). The position is integrated here
+// from the synced camera target read when scrolling starts, so network delay in that synced value doesn't stutter it.
+const fixed coopCamTick = 0.0625;
+const fixed coopCamSpeed = 18.0;    // world units per game second
+bool[4] coopCamHeld;                // left, up, right, down
+bool coopCamActive = false;
+point coopCamPos;
+
+int CoopCamIndex(int key) {
+    if (key == c_keyLeft) { return 0; }
+    if (key == c_keyUp) { return 1; }
+    if (key == c_keyRight) { return 2; }
+    return 3;
+}
+
+bool CoopCamKeyDown(bool testConditions, bool runActions) {
+    if (!runActions) { return true; }
+    coopCamHeld[CoopCamIndex(EventKeyPressed())] = true;
+    coopGuestCamKeys += 1;
+    return true;
+}
+
+bool CoopCamKeyUp(bool testConditions, bool runActions) {
+    if (!runActions) { return true; }
+    coopCamHeld[CoopCamIndex(EventKeyPressed())] = false;
+    return true;
+}
+
+bool CoopCamTick(bool testConditions, bool runActions) {
+    fixed dx = 0.0;
+    fixed dy = 0.0;
+    fixed x;
+    fixed y;
+    region bounds = RegionPlayableMap();
+    if (!runActions) { return true; }
+    if (coopCamHeld[0]) { dx -= 1.0; }
+    if (coopCamHeld[2]) { dx += 1.0; }
+    if (coopCamHeld[1]) { dy += 1.0; }
+    if (coopCamHeld[3]) { dy -= 1.0; }
+    if ((dx == 0.0 && dy == 0.0) || gv_inCinematic) { coopCamActive = false; return true; }
+    if (!coopCamActive) { coopCamPos = CameraGetTarget(coopUiGuest); coopCamActive = true; }
+    x = PointGetX(coopCamPos) + dx * coopCamSpeed * coopCamTick;
+    y = PointGetY(coopCamPos) + dy * coopCamSpeed * coopCamTick;
+    x = MaxF(PointGetX(RegionGetBoundsMin(bounds)), MinF(PointGetX(RegionGetBoundsMax(bounds)), x));
+    y = MaxF(PointGetY(RegionGetBoundsMin(bounds)), MinF(PointGetY(RegionGetBoundsMax(bounds)), y));
+    coopCamPos = Point(x, y);
+    CameraPan(coopUiGuest, coopCamPos, coopCamTick, -1.0, 0.0, false);
+    return true;
+}
+
+// Camera report for the click bridge. The bridge scrolls the guest camera itself on arrow keys (a camera move on the guest's
+// own API shows at once; key events here arrive a network turn late) and only lets the arrow keys through to the scroll
+// above while it doesn't know where the camera is. It needs the synced camera target, the cinematic flag and the bounds,
+// saved to the guest's local CoopBridge bank when they change, and at least once a game second. The camera distance and pitch
+// (mouse-wheel zoom) tell the bridge how screen pixels map to the ground.
+point coopCamReported = null;
+bool coopCamReportedCine = false;
+int coopCamReportAge = 0;
+int coopCamReportSeq = 0;
+fixed coopCamReportedDist = 0.0;
+fixed coopCamReportedPitch = 0.0;
+
+bool CoopCamReport(bool testConditions, bool runActions) {
+    point p;
+    bank b;
+    region bounds = RegionPlayableMap();
+    if (!runActions) { return true; }
+    p = CameraGetTarget(coopUiGuest);
+    coopCamReportAge += 1;
+    if (coopCamReported != null && DistanceBetweenPoints(p, coopCamReported) < 0.05 && coopCamReportedCine == gv_inCinematic && coopCamReportAge < 8
+        && AbsF(CameraGetDistance(coopUiGuest) - coopCamReportedDist) < 0.05 && AbsF(CameraGetPitch(coopUiGuest) - coopCamReportedPitch) < 0.05) { return true; }
+    coopCamReported = p;
+    coopCamReportedCine = gv_inCinematic;
+    coopCamReportedDist = CameraGetDistance(coopUiGuest);
+    coopCamReportedPitch = CameraGetPitch(coopUiGuest);
+    coopCamReportAge = 0;
+    coopCamReportSeq += 1;
+    b = CoopBridgeBank();
+    BankValueSetFromInt(b, "Camera", "seq", coopCamReportSeq);
+    BankValueSetFromFixed(b, "Camera", "x", PointGetX(p));
+    BankValueSetFromFixed(b, "Camera", "y", PointGetY(p));
+    BankValueSetFromFlag(b, "Camera", "cine", gv_inCinematic);
+    BankValueSetFromFixed(b, "Camera", "dist", coopCamReportedDist);
+    BankValueSetFromFixed(b, "Camera", "pitch", coopCamReportedPitch);
+    BankValueSetFromFixed(b, "Camera", "min_x", PointGetX(RegionGetBoundsMin(bounds)));
+    BankValueSetFromFixed(b, "Camera", "min_y", PointGetY(RegionGetBoundsMin(bounds)));
+    BankValueSetFromFixed(b, "Camera", "max_x", PointGetX(RegionGetBoundsMax(bounds)));
+    BankValueSetFromFixed(b, "Camera", "max_y", PointGetY(RegionGetBoundsMax(bounds)));
+    BankSave(b);
+    return true;
+}
+
+void CoopCamInit() {
+    trigger down = TriggerCreate("CoopCamKeyDown");
+    trigger up = TriggerCreate("CoopCamKeyUp");
+    trigger tick = TriggerCreate("CoopCamTick");
+    trigger report = TriggerCreate("CoopCamReport");
+    int[4] keys;
+    int i = 0;
+    keys[0] = c_keyLeft;
+    keys[1] = c_keyUp;
+    keys[2] = c_keyRight;
+    keys[3] = c_keyDown;
+    while (i < 4) {
+        TriggerAddEventKeyPressed(down, coopUiGuest, keys[i], true, c_keyModifierStateIgnore, c_keyModifierStateIgnore, c_keyModifierStateIgnore);
+        TriggerAddEventKeyPressed(up, coopUiGuest, keys[i], false, c_keyModifierStateIgnore, c_keyModifierStateIgnore, c_keyModifierStateIgnore);
+        i += 1;
+    }
+    TriggerAddEventTimePeriodic(tick, coopCamTick, c_timeGame);
+    TriggerAddEventTimePeriodic(report, 0.125, c_timeGame);
+}
+
+void CoopGuestUiInit() {
+    trigger update = TriggerCreate("CoopResUpdate");
+    if (PlayerType(coopUiGuest) != c_playerTypeUser) { return; }
+    coopResProps[0] = c_playerPropMinerals;
+    coopResProps[1] = c_playerPropVespene;
+    coopResProps[2] = c_playerPropSuppliesLimit;
+    coopResProps[3] = c_playerPropSuppliesMade;
+    coopResProps[4] = c_playerPropSuppliesUsed;
+    TriggerAddEventTimePeriodic(update, 0.125, c_timeGame);
+    TriggerExecute(update, false, false);
+    CoopCamInit();
+    CoopPingInit();
+    CoopAllyViewInit();
+}
