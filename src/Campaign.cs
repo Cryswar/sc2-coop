@@ -286,6 +286,8 @@ static class CampaignMaps {
 
     // Separate-army choices for missions built in this run (the host's; CampaignRun sets them after connecting).
     public static SeparateOptions Separate=new SeparateOptions();
+    // Per-player banks of the campaign (CampaignBanks), listed in the hub too.
+    public static HashSet<string> HubPlayerBanks=new HashSet<string>();
     // Whether the last hub built runs on WoL@Kit's library (else Blizzard's libCamp).
     public static bool LastHubKit;
     // Mission game speed (Program.GameSpeeds name), applied a game second into each mission; -coopspeed changes it there.
@@ -303,18 +305,28 @@ static class CampaignMaps {
         foreach(var p in Directory.GetFileSystemEntries(campaignDir,"*.SC2Map"))if(string.Equals(Path.GetFileNameWithoutExtension(p),name,StringComparison.OrdinalIgnoreCase))return p;
         return null;
     }
-    // Player-1 bank names the campaign uses (hub + every mission): the set the host copies to the guest.
-    public static HashSet<string> CampaignBanks(string campaignDir) {
-        var names=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    // Player-1 bank names the campaign uses (hub + every mission): the set the host copies to the guest. Per-player banks
+    // (PlayerBanks) are left out.
+    public static HashSet<string> CampaignBanks(string campaignDir){HashSet<string> own;return CampaignBanks(campaignDir,out own);}
+    // Per-player banks: names a map lists for player 1 and for another player too (e.g. WoL+'s "cryswolcoop" for players 1
+    // and 14). The map keeps each player's own progress in them (credits, upgrades, unlocks), loading each player's from that
+    // player's PC, so the launcher never copies them to the buddy or swaps them with a co-op save: they stay in each player's
+    // own bank folder across sessions and campaigns.
+    public static HashSet<string> CampaignBanks(string campaignDir,out HashSet<string> playerBanks) {
+        var names=new HashSet<string>(StringComparer.OrdinalIgnoreCase);playerBanks=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach(var p in Directory.GetFileSystemEntries(campaignDir,"*.SC2Map")) {
             try {
                 byte[] list;
                 if(Directory.Exists(p)){string f=Path.Combine(p,"BankList.xml");if(!File.Exists(f))continue;list=File.ReadAllBytes(f);}
                 else{var files=MapArchive.Read(p);if(!files.TryGetValue("BankList.xml",out list))continue;}
-                foreach(var b in XDocument.Parse(Encoding.UTF8.GetString(list)).Root.Elements("Bank"))if((string)b.Attribute("Player")=="1")names.Add((string)b.Attribute("Name"));
+                var banks=XDocument.Parse(Encoding.UTF8.GetString(list)).Root.Elements("Bank").ToList();
+                var others=new HashSet<string>(banks.Where(b=>(string)b.Attribute("Player")!="1").Select(b=>(string)b.Attribute("Name")),StringComparer.OrdinalIgnoreCase);
+                foreach(var b in banks)if((string)b.Attribute("Player")=="1"){string n=(string)b.Attribute("Name");names.Add(n);if(others.Contains(n))playerBanks.Add(n);}
             } catch(Exception e){Program.Log("Campaign: could not read the bank list of "+Path.GetFileName(p)+": "+e.Message);}
         }
         names.RemoveWhere(n=>n.StartsWith("Coop",StringComparison.OrdinalIgnoreCase));
+        playerBanks.RemoveWhere(n=>n.StartsWith("Coop",StringComparison.OrdinalIgnoreCase));
+        names.ExceptWith(playerBanks);
         return names;
     }
 
@@ -627,6 +639,10 @@ void CoopHubRecord(string lp_mission, bool lp_simulation, int lp_difficulty) {
 }
 ":"");
         f["MapScript.galaxy"]=Encoding.UTF8.GetBytes(s);AddBank(f,"CoopHub",1);
+        // Per-player banks the hub doesn't list itself: a BankLoad of an unlisted bank gives an empty one, and a BankSave then
+        // wipes the player's file. WoL+'s library pays victories in any map (PlayerLeft with victory), and the hub's mission
+        // launch is player 1's victory: both players' cryswolcoop came back empty (2026-10-25).
+        foreach(var n in HubPlayerBanks)AddBank(f,n,1);
         Directory.CreateDirectory(outDir);string target=Path.Combine(outDir,"TStory01-coop"+tag+".SC2Map");File.WriteAllBytes(target,Mpq.Pack(f));
         Program.Log("Campaign hub built ("+(kit?"WoL@Kit":"Blizzard campaign library")+", "+calls+" launch calls"+(archives>0?", "+archives+" Mission Archives calls":"")+" wrapped"+(guestHub?", "+shopCalls+" shop calls view only (buddy's hub)":"")+"): "+target);
         return target;
@@ -718,6 +734,7 @@ void CoopHubRecord(string lp_mission, bool lp_simulation, int lp_difficulty) {
         string sepBody="";
         if(separate) {
             string sepDecls;s=SeparateArmies.Apply(s,guest,authored,kit,Separate,SeparateArmies.Pickups(Program.CurrentInstall,f,s),out sepDecls,out sepBody);prefix+=sepDecls;
+            if(Environment.GetEnvironmentVariable("SC2_COOP_TEST_GUESTEND")=="1")AddBank(f,"CoopGuestEnd",guest);
             shared=shared.Replace("libNtve_ge_AllianceSetting_AllyWithSharedVisionControlAndSpending","libNtve_ge_AllianceSetting_AllyWithSharedVision");
             // The guest keeps its own race and selection (the shared-army UI setup gives it player 1's race and Command Center).
             shared=Regex.Replace(shared,@"\r?\n\s*PlayerSetRace\([^;]*;","");
@@ -1221,7 +1238,7 @@ class CampaignRun {
     bool Hosting{get{return mode=="host"||mode=="steam-host";}} bool Guest{get{return mode=="join"||mode=="steam-join";}} bool Local{get{return mode=="local";}}
     string Root(string who){return Path.Combine(settings.Workspace,"campaign","profile-"+who);}
     string Banks(string who){return settings.Product?Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),"StarCraft II","Banks"):Path.Combine(Root(who),"Documents","StarCraft II","Banks");}
-    Tunnel tunnel;HashSet<string> bankNames;readonly Dictionary<string,string> hubMaps=new Dictionary<string,string>();readonly HashSet<string> backedUp=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    Tunnel tunnel;HashSet<string> bankNames,playerBanks;readonly Dictionary<string,string> hubMaps=new Dictionary<string,string>();readonly HashSet<string> backedUp=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     static readonly JavaScriptSerializer Json=new JavaScriptSerializer{MaxJsonLength=int.MaxValue};
 
     public CampaignRun(Settings settings,string mode,string host,string campaignDir,int basePort,ManualResetEvent stop){this.settings=settings;this.mode=mode;this.host=host;this.campaignDir=campaignDir;this.basePort=basePort;this.stop=stop;}
@@ -1235,10 +1252,12 @@ class CampaignRun {
         string testStop=Environment.GetEnvironmentVariable("SC2_COOP_TEST_STOP");
         if(!string.IsNullOrEmpty(testStop)){int secs=int.Parse(testStop);new Thread(()=>{Thread.Sleep(secs*1000);Program.Log("Test: pressing Stop");stop.Set();}){IsBackground=true}.Start();}
         // Each player's hub carries their own color (local mode: one hub per window).
+        bankNames=CampaignMaps.CampaignBanks(campaignDir,out playerBanks);Program.Log("Campaign banks synced host -> guest: "+string.Join(", ",bankNames.OrderBy(x=>x)));
+        if(playerBanks.Count>0)Program.Log("Per-player banks (each player keeps their own; not synced or swapped): "+string.Join(", ",playerBanks.OrderBy(x=>x)));
+        CampaignMaps.HubPlayerBanks=playerBanks;
         foreach(var who in Local?new[]{"host","guest"}:new[]{Hosting?"host":"guest"}){int c=ColorFor(who);
             hubMaps[who]=CampaignMaps.BuildKitHub(campaignDir,Path.Combine(settings.Workspace,"campaign","maps"),c,ChatRgb(c),Local?"-"+who:"",who=="guest");}
         hubTitle=CampaignMaps.Title(campaignDir,"TStory01");
-        bankNames=CampaignMaps.CampaignBanks(campaignDir);Program.Log("Campaign banks synced host -> guest: "+string.Join(", ",bankNames.OrderBy(x=>x)));
         Session link=null;
         try {
             if(!Local) {
@@ -1662,7 +1681,8 @@ class CampaignRun {
         var session=new Session{PresetTunnel=tunnel,PresetRoots=Local?new[]{Root("host"),Root("guest")}:new[]{Root(Hosting?"host":"guest")}};
         try{session.Race=MapInfoPlayers.Player1Race(MapArchive.ReadFile(map,"MapInfo"));if(session.Race!=1)Program.Log(mission+": joining as "+(session.Race==3?"Protoss":"Zerg")+" (player 1's race)");}catch(Exception e){Program.Log("Could not read player 1's race: "+e.Message);}
         // Separate armies in the map's own slot: the guest joins with that slot's race.
-        try{var info=MapArchive.ReadFile(map,"MapInfo");int second=MapInfoPlayers.SecondHuman(info);if(second==guest)session.GuestRace=MapInfoPlayers.RaceOf(info,second);}catch(Exception e){Program.Log("Could not read the guest slot's race: "+e.Message);}
+        bool guestEndsItself=Environment.GetEnvironmentVariable("SC2_COOP_SEPARATE")=="1";
+        try{var info=MapArchive.ReadFile(map,"MapInfo");int second=MapInfoPlayers.SecondHuman(info);if(second==guest){session.GuestRace=MapInfoPlayers.RaceOf(info,second);guestEndsItself=true;}}catch(Exception e){Program.Log("Could not read the guest slot's race: "+e.Message);}
         string[] roles=Local?new[]{"host","guest"}:new[]{Hosting?"host":"guest"};
         if(Reuse) {
             var kept=ReuseForMission?roles.Select(TakeSpare).ToArray():new GameClient[roles.Length];
@@ -1672,6 +1692,8 @@ class CampaignRun {
         }
         // The campaign state the mission starts from (the host's banks are the campaign); kept to undo a damaged bank.
         string autosave=null;if(Hosting||Local)try{autosave=CampaignSnapshots.Autosave(settings,"host",mission);}catch(Exception e){Program.Log("Could not back up the campaign banks: "+e.Message);}
+        // The guest's own per-player banks (their own progress, written on the guest's PC): kept the same way on the guest's side.
+        string guestAutosave=null;if((Guest||Local)&&playerBanks.Count>0)try{guestAutosave=CampaignSnapshots.Autosave(settings,"guest","guest-"+mission);}catch(Exception e){Program.Log("Could not back up your campaign banks: "+e.Message);}
         var stopWait=ThreadPool.RegisterWaitForSingleObject(stop,(o,t)=>session.Stop.Set(),null,-1,true);
         string sessionMode=Local?"local":(Hosting?(mode=="steam-host"?"steam-host":"host"):(mode=="steam-join"?"steam-join":"join"));
         int seq=++missionSeq;bool done=false;Thread watcher=null;
@@ -1680,7 +1702,13 @@ class CampaignRun {
             watcher=new Thread(()=>{while(!done){var m=Take(x=>(string)x["type"]=="mission-over"&&Convert.ToInt32(x["seq"])==seq,500);
                 if(m!=null){
                     if(m.ContainsKey("crash")&&Convert.ToBoolean(m["crash"]))Program.Log("Your buddy's StarCraft II closed unexpectedly; ending your mission too. "+NotCounted);
-                    else Program.Log("Your buddy's mission ended; closing yours.");
+                    else {
+                        // Separate armies: the guest's slot gets player 1's result right after (CoopGuestVictory), and the map
+                        // may still save that player's own banks then. Give this game a moment to end by itself.
+                        if(guestEndsItself&&Guest)for(int end=Environment.TickCount+10000;!done&&Environment.TickCount<end;)Thread.Sleep(200);
+                        if(done)return;
+                        Program.Log("Your buddy's mission ended; closing yours.");
+                    }
                     session.Stop.Set();
                     // A join still waiting for the buddy (up to 3 minutes) can't be cancelled through the API; close that game.
                     foreach(var c in session.Clients.ToArray())if(!c.Joined)try{c.Process.Kill();}catch{}
@@ -1717,6 +1745,11 @@ class CampaignRun {
                 int n=CampaignSnapshots.RestoreAfterReplay(settings,"host",autosave,mission);
                 if(n>0)Program.Log("Mission Archives replay: the campaign progress the replay wrote back was restored ("+n+" bank"+(n==1?"":"s")+")");
             } catch(Exception e){Program.Log("Could not restore the campaign progress after the replay: "+e.Message);}
+        }
+        if(guestAutosave!=null) {
+            var bad=CampaignSnapshots.Unreadable(settings,"guest");
+            if(bad.Count>0){CampaignSnapshots.Restore(settings,"guest",guestAutosave);
+                Program.Log("Damaged bank"+(bad.Count==1?"":"s")+" on the guest's side after the mission ("+string.Join(", ",bad)+"); restored the guest's banks as they were before "+mission+".");}
         }
     }
     bool missionReplay;  // the mission being played is a Mission Archives replay

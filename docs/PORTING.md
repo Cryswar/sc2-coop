@@ -98,7 +98,38 @@ What the launcher does with such a map:
   `libNtve_gf_CreateUnitsAtPoint2`, `libNtve_gf_CreateUnitsWithDefaultFacing`): launcher setting "Units the mission gives": who found them (default; the
   player whose units are nearest), take turns, or both get them. Heroes, and anything given before the mission is under
   way or during a cinematic, stay player 1's. Vision of a unit shared with player 1 is shared with the guest too.
-- Not yet: separate credits/research/upgrades from each player's own hub (both use the host's campaign progress).
+- **Maps that already handle the guest's slot** (built 2026-10-25). Each kind below is left to the map, for the whole map,
+  as soon as its script does that kind for the guest's slot anywhere (by number or by a named global such as
+  `gv_pLAYER_02_COOP = 14`):
+  - tech: any `TechTree*(<guest>, ...)` -> player 1's tech calls are not mirrored;
+  - money: any `PlayerModifyProperty*(<guest>, ...)` -> player 1's money is not mirrored, and resource pickups are not shared;
+  - units: any `UnitCreate`/`UnitSetOwner`/`libNtve_gf_RescueUnit`/`libNtve_gf_CreateUnits*` for the guest -> the unit
+    rules above are off.
+  The launcher log says which ("the map gives the guest its own tech, money, units (not mirrored)"). Before, a map that
+  gave the guest its own money got it twice.
+- Mission end: player 1's victory or defeat (the libraries' `GameOver` is for player 1 only) is given to the guest's slot
+  right after, so triggers on `TriggerAddEventPlayerLeft(..., c_gameResultVictory)` run for the guest too, on the guest's PC.
+- Not yet: separate credits/research/upgrades from each player's own hub (both use the host's campaign progress), unless the
+  map keeps them in its own player banks (next section).
+
+### Player banks: each player's own progress (built 2026-10-25)
+
+A map can keep each player's own progress itself: list a bank for player 1 **and** for the guest's slot in `BankList.xml`
+(e.g. `<Bank Name="mycoop" Player="1"/>` and `<Bank Name="mycoop" Player="14"/>`) and load it per player with
+`BankLoad("mycoop", player)`. In an API multiplayer game each player's copy is read from and saved to that player's own PC.
+
+The launcher treats a bank listed for player 1 and for any other player as a **player bank**:
+- never copied from the host to the guest, never swapped with the campaign's co-op save, never reset by "start campaign
+  over": it stays in each player's own Banks folder across sessions and campaigns (so pick a name only your campaign uses);
+- backed up on each side before every mission and restored if a crash damaged it;
+- listed in the launcher log ("Per-player banks ...").
+
+To pay each player at the end, use a victory trigger per player (`TriggerAddEventPlayerLeft(t, c_playerAny,
+c_gameResultVictory)`, then `BankLoad(..., EventPlayer())`, change it, `BankSave`): it runs for player 1 on the host's PC
+and for the guest on the guest's PC. The event fires twice per player; give the trigger the condition
+`PlayerStatus(EventPlayer()) == c_playerStatusActive` so it pays once. The launcher also lists the player banks in the hub
+(an unlisted `BankLoad` returns an empty bank, and saving it wipes the file). Tested 2026-10-25 in local mode
+(`SC2_COOP_TEST_GUESTEND=1` records the guest's victory in its `CoopGuestEnd` bank). Example: WoL+ (`cryswolcoop`: credits, upgrades, research, mercenaries, unlocks).
 
 **Planned: hub purchases and progress (decided 2026-10-22, not built).** One setting for two-faction (separate armies)
 campaigns, covering mission money, Hyperion armory upgrades and research together: "player 1's bank is what counts" (both

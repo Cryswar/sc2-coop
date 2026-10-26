@@ -42,7 +42,8 @@ from that PC's files, and both builds must come out byte-identical.
 1. **Connect** (Steam lobby or TCP), compare setups, exchange profiles. The host's choices win for anything shared.
 2. **Load the co-op save:** the host swaps this campaign's banks from `%LOCALAPPDATA%\SC2Coop\saves\<campaign>` into
    the game's bank folder, then sends them to the guest. Campaigns use the same bank names, so each one needs its own
-   save.
+   save. Per-player banks (listed for player 1 and another player, e.g. WoL+'s `cryswolcoop`) are left out: each
+   player keeps their own.
 3. **Hubs:** each launcher builds its hub map (`BuildKitHub`) and starts it as a solo API game. The hub script records
    a mission pick in a small `CoopHub` bank. The launcher polls that bank:
    - as soon as a pick appears, the other hub gets `-cooplaunch <mission>` so its briefing plays too;
@@ -85,8 +86,9 @@ models, banks in `BankList.xml`).
 
 **Separate armies (`SeparateArmies.cs`):** for maps with a second human slot.
 - Player 1's unit groups and ownership checks count both armies.
-- Money and tech are mirrored to the guest.
+- Money and tech are mirrored to the guest, unless the map already gives the guest its own (per kind).
 - Rescued units and pickups go to whoever found them, alternate, or go to both.
+- Player 1's victory or defeat is given to the guest's slot too.
 
 ## The adapters (Galaxy, `adapters/`)
 
@@ -133,6 +135,7 @@ There is no unit test suite; the launcher is tested by playing:
   - `SC2_COOP_TEST_LAUNCH` (missions to pick in turn), `SC2_COOP_TEST_WIN` (win or lose after N seconds);
   - `SC2_COOP_TEST_HUBCHAT`, `SC2_COOP_TEST_CHAT` (type chat lines);
   - `SC2_COOP_TEST_CRASH`, `SC2_COOP_TEST_STOP`;
-  - `SC2_COOP_TEST_SPEED` (game-clock report).
+  - `SC2_COOP_TEST_SPEED` (game-clock report);
+  - `SC2_COOP_TEST_GUESTEND` (separate armies: the guest's own victory is recorded in its `CoopGuestEnd` bank).
 - **Checks:** the launcher log, window-only screenshots, and the banks the games write.
 - **Smoke test:** every mission of a campaign, picked from the hub and won by command.

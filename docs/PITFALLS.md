@@ -110,6 +110,22 @@ A mission the launcher starts is not a transition map: `GameIsTransitionMap()` i
   banks per campaign and swap it in.
 - **Bank files** are XML. Vanilla campaign banks are unsigned and can be read and patched by the launcher. Some mods
   sign theirs (`<Signature>`); don't edit those.
+- **Per-player banks got the host's copy.** A map listing a bank for player 1 and for the guest's slot (WoL+'s
+  `cryswolcoop`, players 1 and 14) keeps each player's own progress in it; the host -> guest sync copied the host's over
+  the guest's (2026-10-25). Fix: a bank listed for player 1 and any other player is never synced or swapped.
+- **The guest never wins.** The campaign libraries end a mission with `GameOver` for player 1 only, so a map's
+  victory trigger for the guest (`TriggerAddEventPlayerLeft(..., c_gameResultVictory)`, e.g. WoL+ paying each player)
+  never ran for the guest (2026-10-25). Fix: when player 1 leaves with a result, the guest's slot gets the same, and the
+  guest's launcher waits up to 10 s for its own game to end before closing it.
+- **An unlisted bank loads empty.** `BankLoad` of a bank the map's `BankList.xml` doesn't list gives an empty bank; a
+  `BankSave` then overwrites the player's file with it. WoL+'s library (loaded in the hub too) pays victories in any map,
+  and the hub's mission launch is player 1's victory: both players' `cryswolcoop` came back empty (2026-10-25). Fix: the
+  launcher lists the per-player banks in the hub.
+- **`PlayerLeft` fires twice for a player who leaves with a result** (2026-10-25, a victory trigger counted 2). Guard
+  per-player payouts with `PlayerStatus(EventPlayer()) == c_playerStatusActive` (WoL+'s `BankVictory` does).
+- **Double income with authored co-op maps.** Mirroring player 1's money/tech/unit calls to the guest doubled what a
+  map that already handles the guest's slot gives (2026-10-25). Fix: per kind, skip the mirroring when the script does
+  that kind for the guest itself.
 
 ## Windows input and display
 

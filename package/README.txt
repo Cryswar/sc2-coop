@@ -114,7 +114,12 @@ Two kinds of campaigns work: ones built on WoL@Kit, and ones that keep Blizzard'
   the campaign folder has such missions, the launcher shows a "Separate armies" row (the host's choice counts):
   "Units the mission gives" (rescues, reinforcements): who found them (whose units are nearest), take turns, or both get
   them. "Mission money": both get it, or split it. Unlocks and research apply to both players; for now both use the
-  host's campaign progress.
+  host's campaign progress. Missions that already give the buddy their own money, tech or units keep doing so, and
+  the launcher doesn't add player 1's on top.
+- Campaigns with their own per-player bank (a bank the maps list for both players, e.g. WoL+'s "cryswolcoop"): each of
+  you keeps your own. The launcher never copies it from the host or swaps it with the co-op save, and "Reset…"
+  doesn't touch it; it stays in your own Banks folder. When you win a mission the buddy's side is paid too, on the
+  buddy's PC.
 - Not yet supported in co-op: the Simulator and the Arcade (you go back to the hub).
 - Test/skip-ahead chat commands (either player, press Enter, type, Enter):
   In the hub:    -cooplaunch TRaynor02   starts that mission for both of you (no unlock check; in vanilla-based

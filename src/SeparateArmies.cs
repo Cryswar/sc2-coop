@@ -13,6 +13,8 @@
 //   cinematic stay player 1's.
 // - Unit vision shared with player 1 is shared with the guest too; alliances with every other player are copied from
 //   player 1 (except control and spending).
+// - Money, tech and unit gifts are each left to the map when its script already does that kind for the guest's slot.
+// - Player 1's victory or defeat is given to the guest's slot too, so the map's per-player end triggers run for the guest.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -143,16 +145,26 @@ static class SeparateArmies {
             s=Regex.Replace(s,@"\bUnitGetOwner\(((?:[^()]|\([^()]*\))*)\)\s*(==|!=)\s*"+P1+@"\b",
                 m=>{owners++;return (m.Groups[2].Value=="!="?"!":"")+"CoopHostSide(UnitGetOwner("+m.Groups[1].Value+"))";});
         }
-        s=Regex.Replace(s,@"\b("+string.Join("|",Mirrored.Select(c=>c[0]))+@")\(",m=>{mirrored++;return "CoopMirror"+m.Groups[1].Value+"(";});
-        s=Regex.Replace(s,@"\bPlayerModifyPropertyInt\(",m=>{mirrored++;return "CoopMoneyInt(";});
-        s=Calls(s,"UnitSetOwner",3,1,p1,a=>"CoopGiveUnit("+a[0]+", "+a[2]+")",ref given);
-        s=Calls(s,"UnitCreate",6,3,p1,a=>"CoopUnitCreate("+a[0]+", "+a[1]+", "+a[2]+", "+a[4]+", "+a[5]+")",ref given);
-        s=Calls(s,"libNtve_gf_CreateUnitsAtPoint2",5,3,p1,a=>"CoopCreateAtPoint2("+a[0]+", "+a[1]+", "+a[2]+", "+a[4]+")",ref given);
-        s=Calls(s,"libNtve_gf_CreateUnitsWithDefaultFacing",5,3,p1,a=>"CoopCreateDefaultFacing("+a[0]+", "+a[1]+", "+a[2]+", "+a[4]+")",ref given);
-        s=Calls(s,"libNtve_gf_RescueUnit",3,1,p1,a=>"CoopRescueUnit("+a[0]+", "+a[2]+")",ref given);
+        // A map made for co-op may already give the guest's slot its own tech, money or units (WoL+: TechTree*(14, ...),
+        // PlayerModifyPropertyInt(gv_pLAYER_02_COOP, ...), its library's shared income). Mirroring player 1's on top doubled them,
+        // so each kind the map handles for the guest anywhere is left to the map (2026-10-25).
+        bool ownTech=authored&&Regex.IsMatch(s,@"\bTechTree\w+\(\s*"+G+@"\s*,");
+        bool ownMoney=authored&&Regex.IsMatch(s,@"\bPlayerModifyProperty\w+\(\s*"+G+@"\s*,");
+        bool ownUnits=authored&&Regex.IsMatch(s,@"\b(?:UnitCreate\([^;]*?,\s*"+G+@"\s*,|(?:UnitSetOwner|libNtve_gf_RescueUnit)\([^,;]*,\s*"+G+@"\s*,|libNtve_gf_CreateUnits\w*\([^;]*?,\s*"+G+@"\s*,)");
+        var mirroredNow=Mirrored.Where(c=>ownTech?!c[0].StartsWith("TechTree"):true).Where(c=>ownMoney?!c[0].StartsWith("PlayerModifyProperty"):true).ToList();
+        if(mirroredNow.Count>0)s=Regex.Replace(s,@"\b("+string.Join("|",mirroredNow.Select(c=>c[0]))+@")\(",m=>{mirrored++;return "CoopMirror"+m.Groups[1].Value+"(";});
+        if(!ownMoney)s=Regex.Replace(s,@"\bPlayerModifyPropertyInt\(",m=>{mirrored++;return "CoopMoneyInt(";});
+        if(!ownUnits) {
+            s=Calls(s,"UnitSetOwner",3,1,p1,a=>"CoopGiveUnit("+a[0]+", "+a[2]+")",ref given);
+            s=Calls(s,"UnitCreate",6,3,p1,a=>"CoopUnitCreate("+a[0]+", "+a[1]+", "+a[2]+", "+a[4]+", "+a[5]+")",ref given);
+            s=Calls(s,"libNtve_gf_CreateUnitsAtPoint2",5,3,p1,a=>"CoopCreateAtPoint2("+a[0]+", "+a[1]+", "+a[2]+", "+a[4]+")",ref given);
+            s=Calls(s,"libNtve_gf_CreateUnitsWithDefaultFacing",5,3,p1,a=>"CoopCreateDefaultFacing("+a[0]+", "+a[1]+", "+a[2]+", "+a[4]+")",ref given);
+            s=Calls(s,"libNtve_gf_RescueUnit",3,1,p1,a=>"CoopRescueUnit("+a[0]+", "+a[2]+")",ref given);
+        }
         s=Calls(s,"libNtve_gf_ShareVisionofUnit",3,2,p1,a=>"CoopShareVision("+a[0]+", "+a[1]+")",ref vision);
         // Resource pickups (Kit's campaign library pays whoever picked the cache up): the other player gets the same, or half each.
-        int caches=0;s=Regex.Replace(s,@"\blibCamp_gf_DestroyCacheAndGivePlayerResources\(",m=>{caches++;return "CoopCacheResources(";});
+        int caches=0;if(!ownMoney)s=Regex.Replace(s,@"\blibCamp_gf_DestroyCacheAndGivePlayerResources\(",m=>{caches++;return "CoopCacheResources(";});
+        if(ownMoney)pickups=new List<Tuple<string,int,int>>();
 
         int units=Array.IndexOf(SeparateOptions.UnitChoices,SeparateOptions.Clean(options.Units,SeparateOptions.UnitChoices));
         int money=Array.IndexOf(SeparateOptions.MoneyChoices,SeparateOptions.Clean(options.Money,SeparateOptions.MoneyChoices));
@@ -263,6 +275,26 @@ static class SeparateArmies {
             "    if (player == 1) { other = "+guest+"; }\n");
         foreach(var p in pickups)sb.Append("    if (e == \""+p.Item1+"\") { CoopPickupPay(player, other, "+p.Item2+", "+p.Item3+"); }\n");
         sb.Append("    return true;\n}\n");
+        // The mission ends with player 1's result (the libraries' GameOver is for player 1 only). The guest's own slot gets the
+        // same result right after, so what the map does when a player leaves with a victory runs for the guest too, on the guest's
+        // PC: e.g. WoL+ pays each player into their own bank (PlayerLeft with c_gameResultVictory, then BankSave). Before, the
+        // launcher closed the guest's game first and the guest was never paid (2026-10-25).
+        // Test (SC2_COOP_TEST_GUESTEND=1): the guest's own victory is recorded in the guest's CoopGuestEnd bank, the way a map's
+        // per-player payout does it (BuildMission lists that bank for the guest's slot).
+        if(Environment.GetEnvironmentVariable("SC2_COOP_TEST_GUESTEND")=="1")sb.Append("bool CoopGuestEndTest(bool testConds, bool runActions) {\n"+
+            "    bank b;\n"+
+            "    if (testConds && PlayerStatus(EventPlayer()) != c_playerStatusActive) { return false; }\n"+
+            "    if (!runActions) { return true; }\n"+
+            "    b = BankLoad(\"CoopGuestEnd\", EventPlayer());\n"+
+            "    BankValueSetFromInt(b, \"End\", \"victories\", BankValueGetAsInt(b, \"End\", \"victories\") + 1);\n"+
+            "    BankSave(b);\n"+
+            "    return true;\n}\n");
+        sb.Append("bool CoopGuestVictory(bool testConds, bool runActions) {\n"+
+            "    if (runActions && PlayerStatus("+guest+") == c_playerStatusActive) { GameOver("+guest+", c_gameOverVictory, false, false); }\n"+
+            "    return true;\n}\n"+
+            "bool CoopGuestDefeat(bool testConds, bool runActions) {\n"+
+            "    if (runActions && PlayerStatus("+guest+") == c_playerStatusActive) { GameOver("+guest+", c_gameOverDefeat, false, false); }\n"+
+            "    return true;\n}\n");
         sb.Append("void CoopSeparateStart() {\n    trigger pickup = TriggerCreate(\"CoopPickupUsed\");\n");
         if(!authored)sb.Append(
             "    unitgroup g = UnitGroup(null, 1, RegionEntireMap(), UnitFilter(0, 0, (1 << c_targetFilterStructure) | (1 << c_targetFilterMissile), (1 << (c_targetFilterDead - 32)) | (1 << (c_targetFilterHidden - 32))), 0);\n"+
@@ -278,6 +310,9 @@ static class SeparateArmies {
             "    if (UnitGroupCount(cc, c_unitCountAll) > 0) {\n"+
             "        UnitCreate(1, \"CommandCenterFlying\", 0, "+guest+", PointWithOffset(UnitGetPosition(UnitGroupUnit(cc, 1)), 0.0, -7.0), 270.0);\n"+
             "    }\n");
+        sb.Append("    TriggerAddEventPlayerLeft(TriggerCreate(\"CoopGuestVictory\"), 1, c_gameResultVictory);\n"+
+            "    TriggerAddEventPlayerLeft(TriggerCreate(\"CoopGuestDefeat\"), 1, c_gameResultDefeat);\n"+
+            (Environment.GetEnvironmentVariable("SC2_COOP_TEST_GUESTEND")=="1"?"    TriggerAddEventPlayerLeft(TriggerCreate(\"CoopGuestEndTest\"), "+guest+", c_gameResultVictory);\n":""));
         foreach(var name in pickups.Select(p=>p.Item1).Distinct())sb.Append("    TriggerAddEventUnitAbility(pickup, null, AbilityCommand(\""+name+"\", 0), c_unitAbilStageExecute, false);\n");
         // Campaign tech (armory upgrades, research) for the guest: Kit's library takes a player; Blizzard's
         // (libCamp_gf_TS_UpdateTechStates) only does player 1, so vanilla guests get just the mirrored mission tech for now.
@@ -287,6 +322,7 @@ static class SeparateArmies {
         code=sb.ToString();
         Program.Log("Separate armies (guest player "+guest+(authored?", the map's own slot":", cloned slot")+"): "+
             (ownCounts?"the map counts the guest's units itself":groups+" unit groups count both armies, "+owners+" owner checks")+", "+
+            (ownTech||ownMoney||ownUnits?"the map gives the guest its own "+string.Join(", ",new[]{ownTech?"tech":null,ownMoney?"money":null,ownUnits?"units":null}.Where(x=>x!=null))+" (not mirrored), ":"")+
             mirrored+" money/tech calls mirrored, "+given+" unit gifts ("+SeparateOptions.UnitChoices[units]+"), "+vision+" vision shares, "+caches+" scripted and "+pickups.Select(p=>p.Item1).Distinct().Count()+" data resource pickups; mission money: "+SeparateOptions.MoneyChoices[money]);
         return s;
     }
