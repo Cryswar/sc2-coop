@@ -9,7 +9,8 @@
 // The bridge may also send a probe before this report reaches it (it guesses targeting from the key, e.g. A). If no
 // targeting mode was on when the probe arrived, the probe is taken back the same way and counted as a stray.
 const int coopGuest = 6;
-const int coopProbeMax = 64;
+// SC2's selection limit: every unit of a full selection must be swapped, or the rest keep the queued Move probe.
+const int coopProbeMax = 500;
 bool coopTargeting = false;
 abilcmd coopTargetCmd = null;
 int coopTargetSeq = 0;
@@ -354,12 +355,17 @@ bool CoopProbeProcess(bool testConditions, bool runActions) {
         i = 0;
     }
     // The buttons that carry the command on the probed types (the active subgroup's type is one of them).
+    // Once per owner and type: large selections are mostly a few types.
     coopEvtFaces = " ";
     coopEvtKeys = " ";
     coopEvtHotkeys = " ";
+    a = " ";
     while (i < coopProbeCount && abil != "") {
-        if (UnitIsAlive(coopProbeUnit[i])) { CoopEventButtons(UnitGetOwner(coopProbeUnit[i]), UnitGetType(coopProbeUnit[i]), abil, cmd); }
+        u = coopProbeUnit[i];
         i += 1;
+        if (!UnitIsAlive(u) || CoopInSet(a, IntToString(UnitGetOwner(u)) + ":" + UnitGetType(u))) { continue; }
+        a = a + IntToString(UnitGetOwner(u)) + ":" + UnitGetType(u) + " ";
+        CoopEventButtons(UnitGetOwner(u), UnitGetType(u), abil, cmd);
     }
     // Each unit's own order, or null: dead, stray, or nothing on its card for the button.
     i = 0;

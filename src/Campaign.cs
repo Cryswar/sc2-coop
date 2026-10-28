@@ -747,6 +747,8 @@ void CoopHubRecord(string lp_mission, bool lp_simulation, int lp_difficulty) {
         s=prefix+s;
         s=s.Replace(marker,marker+"\n    PlayerSetDifficulty(1, "+difficulty+");");
         s=s.Replace("    InitTriggers();","    InitTriggers();\n    CoopTargetingInit();\n    CoopCampaignInit();");
+        string[] bigGroup=(Environment.GetEnvironmentVariable("SC2_COOP_TEST_BIGGROUP")??"").Split(',').Select(x=>x.Trim()).Where(x=>Regex.IsMatch(x,@"^\d+$")).ToArray();
+        if(bigGroup.Length!=2)bigGroup=null;
         s+="\n"+sepBody+"\n"+shared+"\n"+targeting+"\n"+ui+@"
 // Generic co-op start (no mission-specific markers): mirror player 1's alliances to the guest every second (missions
 // change alliances as they go), and set up the guest's UI and camera once the mission's own setup has run.
@@ -798,12 +800,54 @@ bool CoopClock(bool testConds, bool runActions) {
     BankValueSetFromInt(b, ""Clock"", ""s"" + IntToString(coopClockN), GameGetSpeedValue());
     BankSave(b);
     return true;
+}":"")+(bigGroup!=null?@"
+// Test (SC2_COOP_TEST_BIGGROUP=<s>,<n>): s game seconds in, n player-1 marines at the guest's camera walk south, selected for the
+// guest with attack targeting taken as on; the bridge (ClickBridge.TestProbeAt) then sends one attack probe. The CoopBridge bank's
+// Test section counts what the marines do 3 game seconds after the probe was processed: attack, still on the first move, other.
+bool CoopBigGroup(bool testConds, bool runActions) {
+    point at = CameraGetTarget(coopGuest);
+    unitgroup g;
+    int issued = coopProbeIssued;
+    int i = 1;
+    int attack = 0;
+    int moving = 0;
+    int other = 0;
+    unit u;
+    bank b;
+    UnitCreate(" + bigGroup[1] + @", ""Marine"", c_unitCreateIgnorePlacement, 1, at, 270.0);
+    g = UnitLastCreatedGroup();
+    UnitGroupIssueOrder(g, OrderTargetingPoint(AbilityCommand(""move"", 0), PointWithOffset(at, 0.0, -40.0)), c_orderQueueReplace);
+    UnitClearSelection(coopGuest);
+    UnitGroupSelect(g, coopGuest, true);
+    Wait(1.0, c_timeGame);
+    coopTargeting = true;
+    coopTargetCmd = AbilityCommand(""attack"", 0);
+    b = CoopBridgeBank();
+    BankValueSetFromInt(b, ""Test"", ""created"", UnitGroupCount(g, c_unitCountAlive));
+    BankValueSetFromFlag(b, ""Test"", ""ready"", true);
+    BankSave(b);
+    while (coopProbeIssued == issued) { Wait(0.5, c_timeGame); }
+    Wait(3.0, c_timeGame);
+    while (i <= UnitGroupCount(g, c_unitCountAll)) {
+        u = UnitGroupUnit(g, i);
+        i += 1;
+        if (UnitOrderCount(u) > 0 && AbilityCommandGetAbility(OrderGetAbilityCommand(UnitOrder(u, 0))) == ""attack"") { attack += 1; }
+        else if (UnitOrderCount(u) > 0 && AbilityCommandGetAbility(OrderGetAbilityCommand(UnitOrder(u, 0))) == ""move"") { moving += 1; }
+        else { other += 1; }
+    }
+    b = CoopBridgeBank();
+    BankValueSetFromInt(b, ""Test"", ""attack"", attack);
+    BankValueSetFromInt(b, ""Test"", ""moving"", moving);
+    BankValueSetFromInt(b, ""Test"", ""other"", other);
+    BankSave(b);
+    return true;
 }":"")+@"
 void CoopCampaignInit() {
     trigger t = TriggerCreate(""CoopCampaignTick"");
     TriggerAddEventTimePeriodic(t, 1.0, c_timeGame);
     TriggerAddEventChatMessage(TriggerCreate(""CoopDebugEnd""), c_playerAny, ""-coop"", false);"+(Environment.GetEnvironmentVariable("SC2_COOP_TEST_SPEED")=="1"?@"
-    TriggerAddEventTimePeriodic(TriggerCreate(""CoopClock""), 5.0, c_timeReal);":"")+@"
+    TriggerAddEventTimePeriodic(TriggerCreate(""CoopClock""), 5.0, c_timeReal);":"")+(bigGroup!=null?@"
+    TriggerAddEventTimeElapsed(TriggerCreate(""CoopBigGroup""), " + bigGroup[0] + @".0, c_timeGame);":"")+@"
 }
 ";
         // Test/skip-ahead commands (either player, in chat):
@@ -1794,17 +1838,16 @@ class CampaignRun {
     // campaign on Blizzard's scripts), so playing a second campaign would overwrite the first one's progress. The host's
     // launcher keeps each campaign's banks in %LOCALAPPDATA%\SC2Coop\saves\<campaign> (per Windows user, so a newer launcher
     // in another folder finds them; test runs: the workspace), swaps them in when a session starts and stores them back
-    // after every mission and at the end. The first time any campaign is played this way, the banks already in the folder
-    // become that campaign's save (earlier co-op progress); later, a new campaign starts fresh.
+    // after every mission and at the end. A campaign without a co-op save starts fresh: banks of the same names already in
+    // the folder (editor test runs, other API tools, another campaign on the same scripts) would start it mid-campaign.
+    // WriteBanks backs them up first.
     bool saveLoaded;
     string SaveDir{get{return CampaignSaves.Dir(settings,campaignDir);}}
     void LoadSave() {
-        string saves=Path.GetDirectoryName(SaveDir),dir=Banks("host");
+        string dir=Banks("host");
         if(Directory.Exists(SaveDir)) {
             var m=PackBanks(SaveDir);WriteBanks(dir,(Dictionary<string,object>)m["files"],(List<string>)m["absent"]);
             Program.Log("Loaded the co-op save of "+Path.GetFileName(SaveDir)+" ("+((Dictionary<string,object>)m["files"]).Count+" banks)");
-        } else if(!Directory.Exists(saves)||Directory.GetDirectories(saves).Length==0) {
-            Program.Log("First co-op save: "+Path.GetFileName(SaveDir)+" keeps the campaign progress already in "+dir);
         } else {
             WriteBanks(dir,new Dictionary<string,object>(),bankNames);
             Program.Log("New co-op save for "+Path.GetFileName(SaveDir)+": the campaign starts from the beginning");

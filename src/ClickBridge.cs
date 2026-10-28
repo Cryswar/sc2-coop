@@ -846,6 +846,8 @@ class ClickBridge : IDisposable {
         IntPtr hwnd=client.Process.MainWindowHandle;
         PostMessage(hwnd,WM_KEYDOWN,new IntPtr(vk),new IntPtr(1));Thread.Sleep(60);PostMessage(hwnd,WM_KEYUP,new IntPtr(vk),new IntPtr(unchecked((int)0xC0000001)));
     }
+    // Test hook (SC2_COOP_TEST_BIGGROUP): a targeted click at this feature-layer point once the map's Test/ready flag is set.
+    public volatile int[] TestProbeAt;
     public void TestRect(int ax,int ay,int bx,int by) {Enqueue(Wire.Msg(4,Wire.Msg(1,Wire.Msg(1,Point(ax,ay)),Wire.Msg(2,Point(bx,by)))),"test rect "+ax+","+ay+"-"+bx+","+by);}
     public void TestWheel(int notches) {Wheel(notches);}
     public string TestZoom() {lock(camGate)return zoomDistance.ToString("0.0")+"/"+zoomPitch.ToString("0.0");}
@@ -984,6 +986,11 @@ class ClickBridge : IDisposable {
                     if(pair!=0&&Environment.TickCount-lastUiInputTick<1500&&!Predicts(pair,pair&0xFFFF)){learned[pair]=true;log("Click bridge: learned targeting input "+PairName(pair)+" ("+targetAbil+")");}
                 }
                 targetOn=nowOn;targetSeq=newSeq;
+                var testReady=value("Test","ready");var testAt=TestProbeAt;
+                if(testAt!=null&&testReady!=null&&(string)testReady.Attribute("flag")=="1") {
+                    TestProbeAt=null;
+                    queue.Add(new Item{Kind=Kind.TargetClick,X=testAt[0],Y=testAt[1],Tick=Environment.TickCount,Body=Probe(testAt[0],testAt[1],false),What="test big-group probe "+testAt[0]+","+testAt[1]});
+                }
                 var stray=value("Probe","stray");
                 if(stray!=null) {
                     int n=int.Parse((string)stray.Attribute("int"));

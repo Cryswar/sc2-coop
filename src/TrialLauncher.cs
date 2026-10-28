@@ -394,6 +394,8 @@ class Session {
                 if(Stop.WaitOne(30000))return;
                 foreach(var pt in testSelect.Split(';')){var n=pt.Split(',').Select(int.Parse).ToArray();bridge.TestSelect(n[0],n[1]);if(Stop.WaitOne(1500))return;}
             });
+            // SC2_COOP_TEST_BIGGROUP (Campaign.cs): the attack probe goes north of the guest camera.
+            if(bridge!=null&&!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("SC2_COOP_TEST_BIGGROUP"))){int r=Program.Calibration(settings).Resolution;bridge.TestProbeAt=new[]{r/2,r/6};}
             // SC2_COOP_TEST_LEAVE=<client>,<s>: that client leaves the game through the API (stand-in for End Game).
             string testLeave=Environment.GetEnvironmentVariable("SC2_COOP_TEST_LEAVE");
             if(!string.IsNullOrEmpty(testLeave))Task.Run(()=>{
