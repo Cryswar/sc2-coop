@@ -1016,7 +1016,9 @@ void CoopSwarmObjectiveState(string lp_objective, int lp_state) {
         UserDataSetInt(""MissionObjective"", inst, ""Complete"", 1, 1);
         UserDataSetInt(""MissionObjective"", inst, ""Available"", 1, 0);
         UserDataSetInt(""MissionObjective"", inst, ""Progress"", 1, libSwaC_gf_MissionObjectiveItemCount(lp_objective));
-        CoopObjectiveSetState(o, c_objectiveStateCompleted);
+        // Missions complete a counted objective twice (progress at the count, then the state): the second time would put
+        // back the name recorded the first time (2026-10-28: a finished bonus objective read 1/2).
+        if (CoopObjectiveGetState(o) != c_objectiveStateCompleted) { CoopObjectiveSetState(o, c_objectiveStateCompleted); }
         return;
     }
     if (lp_state == libSwaC_ge_MissionObjectiveState_Failed) {
@@ -1035,9 +1037,13 @@ void CoopSwarmObjectiveProgress(string lp_objective, int lp_progress, bool lp_up
 void CoopSwarmObjectiveProgress2(string lp_objective, int lp_current, bool lp_showHideMax, text lp_label, bool lp_updatetext) {
     CoopSwarmObjectiveProgressAdvanced(lp_objective, lp_current, lp_showHideMax, lp_label, lp_updatetext, true);
 }
+// The text first, so a completion at the count keeps the final count (""2/2"") in the name it records.
 void CoopSwarmObjectiveProgressAdvanced(string lp_objective, int lp_current, bool lp_showHideMax, text lp_label, bool lp_updatetext, bool lp_updateState) {
-    CoopSwarmObjectiveProgress(lp_objective, lp_current, lp_updateState);
+    libSwaC_gf_ZS_SetObjectiveProgressData(lp_objective, lp_current, false);
     if (lp_updatetext) { libSwaC_gf_UpdateMissionObjectiveText(lp_objective, lp_current, lp_showHideMax, lp_label); }
+    if (lp_updateState && lp_current == libSwaC_gf_MissionObjectiveItemCount(lp_objective)) {
+        CoopSwarmObjectiveState(lp_objective, libSwaC_ge_MissionObjectiveState_Completed);
+    }
 }
 ";
             Program.Log(mission+": "+swarmObjectiveCalls+" HotS objective calls routed through the co-op objective handling");
