@@ -890,7 +890,6 @@ class ClickBridge : IDisposable {
     // spatial: ActionSpatial body -> RequestAction{actions:[Action{action_feature_layer:...}]}
     static byte[] Spatial(byte[] spatial) {return Wire.Msg(1,Wire.Msg(2,spatial));}
     void Enqueue(byte[] spatial,string what) {queue.Add(new Item{Kind=Kind.Spatial,Body=Spatial(spatial),What=what,Tick=Environment.TickCount});}
-
     // A recent key or command-card press may be starting targeting; give the map's report time to arrive. The report goes
     // through the game's network turn, so the wait can last hundreds of ms. A right-click queued behind this click ends
     // the wait (it would otherwise wait too); the click is then decided with what is known so far.
@@ -928,15 +927,9 @@ class ClickBridge : IDisposable {
                         PressEscape();ignoreTargetOn=true;log("Click bridge: right-click cancels targeting "+targetAbil);continue;
                     }
                     result=Send(body);
-                    // A point select that hits nothing (result 3) is retried a few feature pixels around the click: the
-                    // calibration is a flat-ground model, so small units on slopes or at other resolutions are missed.
                     if(cutShort)what+=" (targeting wait cut short by a right-click)";
                     // Not after a cut-short wait: the click may have been meant for targeting, so don't grab a nearby unit.
-                    if(result==3&&item.Kind==Kind.LeftClick&&!esc&&!cutShort&&item.SelectType!=0)
-                        foreach(var o in SelectOffsets) {
-                            int x=Clamp(item.X+o[0]),y=Clamp(item.Y+o[1]);
-                            if(Send(Spatial(Wire.Msg(3,Wire.Msg(1,Point(x,y)),Wire.Num(2,item.SelectType))))==1){result=1;what+=" (hit at "+x+","+y+")";break;}
-                        }
+                    if(result==3&&item.Kind==Kind.LeftClick&&!esc&&!cutShort&&item.SelectType!=0){int x,y,tried;if(SnapSelect(item,out x,out y,out tried)){result=1;what+=" (hit at "+x+","+y+")";}else what+=" ("+tried+" spots around it missed too)";}
                 }
                 if(result==1)Sent++;else Failed++;
                 // A late "on" report for the targeting just ended is stale.
@@ -946,11 +939,47 @@ class ClickBridge : IDisposable {
         }
     }
 
-    static readonly int[][] SelectOffsets={new[]{2,0},new[]{-2,0},new[]{0,2},new[]{0,-2},new[]{2,2},new[]{-2,2},new[]{2,-2},new[]{-2,-2},new[]{4,0},new[]{-4,0},new[]{0,4},new[]{0,-4}};
-    ulong Send(byte[] body) {
-        var response=client.Request(11,body,10).M(11);
-        object raw=response.Fields.ContainsKey(1)?response.Fields[1][0]:null;
-        return raw is ulong?(ulong)raw:raw is byte[]&&((byte[])raw).Length>0?((byte[])raw)[0]:0UL;
+    // A point select that hits nothing (result 3) is retried around the click. The calibration maps the click onto flat ground
+    // at the camera target's height, and a point select hits a unit's footprint, but the guest clicks the unit's model: its body
+    // stands above the footprint, and on raised ground (Char's cliffs) the footprint is higher than the camera target too. Both
+    // put the footprint south of the mapped point (+y), by height / tan(pitch): more when zoomed in (flatter camera). Lower
+    // ground puts it north. Hand-played ZChar01 (2026-10-28): 27 of 80 point selects missed after a 2-4 px ring; the ones the
+    // ring rescued were mostly 2-4 px south. Flying units are drawn about 3.5 units up: with 1.5 units south Overlords were
+    // nearly unclickable (the hits were at the 10-12 px edge). The search: 0.75 world units sideways and north, 4 south
+    // (stretched as the camera flattens, up to 6), nearest first with south distances counted at half.
+    // Plain and all-of-type selects go in one request, farthest spot first: a select that hits nothing changes nothing, so the
+    // last hit, the nearest unit, is the selection. Toggle and add selects (shift) would stack, so they go one at a time.
+    const double SnapSide=0.75,SnapSouth=4,SnapSouthMax=6,SnapStep=0.25;const int SnapSequential=24;
+    bool SnapSelect(Item item,out int hx,out int hy,out int tried) {
+        double pitch;lock(camGate)pitch=zoomPitch;
+        var spots=SnapSpots(cal.Resolution/cal.FeatureWidth,pitch).Select(o=>new[]{Clamp(item.X+o[0]),Clamp(item.Y+o[1])})
+            .Where(s=>s[0]!=item.X||s[1]!=item.Y).Distinct(new SpotComparer()).ToList();
+        Func<int[],byte[]> select=s=>Spatial(Wire.Msg(3,Wire.Msg(1,Point(s[0],s[1])),Wire.Num(2,item.SelectType)));
+        hx=hy=-1;tried=0;
+        if(item.SelectType==1||item.SelectType==3) {
+            spots.Reverse();tried=spots.Count;
+            var results=SendAll(Wire.Join(spots.Select(select).ToArray()));
+            for(int i=Math.Min(results.Count,spots.Count)-1;i>=0;i--)if(results[i]==1){hx=spots[i][0];hy=spots[i][1];return true;}
+            return false;
+        }
+        foreach(var s in spots.Take(SnapSequential)){tried++;if(Send(select(s))==1){hx=s[0];hy=s[1];return true;}}
+        return false;
+    }
+    class SpotComparer : IEqualityComparer<int[]> {public bool Equals(int[] a,int[] b){return a[0]==b[0]&&a[1]==b[1];}public int GetHashCode(int[] a){return a[0]*397^a[1];}}
+    // Feature-pixel offsets around a missed click, nearest first (south counted at half). ppu: feature pixels per world unit.
+    static List<int[]> SnapSpots(double ppu,double pitch) {
+        double stretch=Math.Max(1,Math.Min(2.2,Math.Tan(BridgeCalibration.DefaultPitch*Math.PI/180)/Math.Tan(Math.Max(20,pitch)*Math.PI/180)));
+        int step=Math.Max(1,(int)Math.Round(SnapStep*ppu)),side=(int)Math.Round(SnapSide*ppu/step),south=(int)Math.Round(Math.Min(SnapSouthMax,SnapSouth*stretch)*ppu/step);
+        var l=new List<int[]>();
+        for(int i=-side;i<=side;i++)for(int j=-side;j<=south;j++)if(i!=0||j!=0)l.Add(new[]{i*step,j*step});
+        return l.OrderBy(o=>o[0]*o[0]+(o[1]>0?o[1]*o[1]/4.0:o[1]*o[1])).ThenBy(o=>-o[1]).ToList();
+    }
+    ulong Send(byte[] body) {var r=SendAll(body);return r.Count>0?r[0]:0UL;}
+    // Results of a RequestAction, one per action (repeated enum, packed or not).
+    List<ulong> SendAll(byte[] body) {
+        var response=client.Request(11,body,10).M(11);var l=new List<ulong>();
+        if(response.Fields.ContainsKey(1))foreach(var raw in response.Fields[1]){if(raw is ulong)l.Add((ulong)raw);else if(raw is byte[])l.AddRange(((byte[])raw).Select(b=>(ulong)b));}
+        return l;
     }
 
     void PressEscape() {

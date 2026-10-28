@@ -392,7 +392,8 @@ class Session {
             string testSelect=Environment.GetEnvironmentVariable("SC2_COOP_TEST_SELECT");
             if(bridge!=null&&!string.IsNullOrEmpty(testSelect))Task.Run(()=>{
                 if(Stop.WaitOne(30000))return;
-                foreach(var pt in testSelect.Split(';')){var n=pt.Split(',').Select(int.Parse).ToArray();bridge.TestSelect(n[0],n[1]);if(Stop.WaitOne(1500))return;}
+                // "x,y": a left click at that feature-layer point; "army": F2 (the map selects the army).
+                foreach(var pt in testSelect.Split(';')){if(pt=="army")bridge.TestNativeKey(0x71);else{var n=pt.Split(',').Select(int.Parse).ToArray();bridge.TestSelect(n[0],n[1]);}if(Stop.WaitOne(1500))return;}
             });
             // SC2_COOP_TEST_BIGGROUP (Campaign.cs): the attack probe goes north of the guest camera.
             if(bridge!=null&&!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("SC2_COOP_TEST_BIGGROUP"))){int r=Program.Calibration(settings).Resolution;bridge.TestProbeAt=new[]{r/2,r/6};}

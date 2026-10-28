@@ -301,6 +301,43 @@ void CoopCamInit() {
     TriggerAddEventTimePeriodic(report, 0.125, c_timeGame);
 }
 
+// Army hotkey (F2): the guest's own F2 (and the API's select-army) selects its own player's army, which has no units in
+// shared control (2026-10-28 test: no effect). So on the guest's F2 the map selects player 1's army for the guest: units
+// that aren't structures, workers, larvae, eggs, cocoons or overlords, as SC2's army button. Shift+F2 adds. With an army
+// of its own (separate armies) the guest's native F2 is left alone.
+bool CoopArmyExcluded(string type) {
+    return type == "Larva" || type == "Egg" || type == "Overlord" || type == "OverlordTransport" || type == "OverlordCocoon"
+        || type == "TransportOverlordCocoon" || type == "BanelingCocoon" || type == "BroodLordCocoon" || type == "RavagerCocoon"
+        || type == "LurkerMPEgg";
+}
+
+unitgroup CoopArmyOf(int player) {
+    return UnitGroup(null, player, RegionEntireMap(), UnitFilter(0, 0, (1 << c_targetFilterStructure) | (1 << c_targetFilterWorker)
+        | (1 << c_targetFilterMissile), (1 << (c_targetFilterDead - 32)) | (1 << (c_targetFilterHidden - 32))), 0);
+}
+
+bool CoopArmyKey(bool testConditions, bool runActions) {
+    unitgroup army;
+    unit u;
+    int i;
+    if (!runActions) { return true; }
+    army = CoopArmyOf(coopUiGuest);
+    i = UnitGroupCount(army, c_unitCountAll);
+    while (i > 0) {
+        if (!CoopArmyExcluded(UnitGetType(UnitGroupUnit(army, i)))) { return true; }
+        i -= 1;
+    }
+    army = CoopArmyOf(coopUiOwner);
+    if (!EventKeyShift()) { UnitClearSelection(coopUiGuest); }
+    i = UnitGroupCount(army, c_unitCountAll);
+    while (i > 0) {
+        u = UnitGroupUnit(army, i);
+        if (!CoopArmyExcluded(UnitGetType(u))) { UnitSelect(u, coopUiGuest, true); }
+        i -= 1;
+    }
+    return true;
+}
+
 void CoopGuestUiInit() {
     trigger update = TriggerCreate("CoopResUpdate");
     if (PlayerType(coopUiGuest) != c_playerTypeUser) { return; }
@@ -314,4 +351,5 @@ void CoopGuestUiInit() {
     CoopCamInit();
     CoopPingInit();
     CoopAllyViewInit();
+    TriggerAddEventKeyPressed(TriggerCreate("CoopArmyKey"), coopUiGuest, c_keyF2, true, c_keyModifierStateIgnore, c_keyModifierStateExclude, c_keyModifierStateExclude);
 }
