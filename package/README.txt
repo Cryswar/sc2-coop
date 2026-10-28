@@ -14,6 +14,11 @@ What you need (both players)
   from its own StarCraft II files.
 - Battle.net doesn't need to be running. The game is started by this launcher in offline API mode
   (the same mechanism Archipelago and the official SC2 AI tools use).
+- For a campaign built on Heart of the Swarm or Legacy of the Void: that expansion on your own Battle.net
+  account (Wings of Liberty is free). SC2Coop includes no Blizzard maps, mods or game data, and it can't see
+  what your account owns (offline mode reports no licenses), so the first time you start such a campaign it
+  asks you to confirm that you own it. Each player confirms in their own launcher. Please only play campaigns
+  for expansions you own.
 
 Setup (both players, once)
 --------------------------

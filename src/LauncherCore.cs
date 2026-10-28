@@ -42,6 +42,8 @@ class LauncherController {
     public event Action<string> LogLine;
     public event Action<string> LatencyChanged;
     public event Action<bool> RunningChanged;
+    // Asks the player (campaign name, expansions it uses) whether they own them; true = yes. Called on the window's thread.
+    public Func<string,List<string>,bool> ConfirmOwnership;
 
     Session session;ManualResetEvent campaignStop;volatile bool running;
     public bool Running{get{return running;}}
@@ -197,6 +199,16 @@ class LauncherController {
             string address=m=="join"?Address.Trim():m=="steam-join"?friendTarget:"127.0.0.1";
             string dir=Campaign?CampaignDir.Trim():null;
             if(Campaign&&!Directory.Exists(dir))throw new Exception("Choose the campaign folder (Browse)");
+            if(Campaign) {
+                // A campaign that uses a paid expansion: the player confirms owning it, once per campaign (CampaignExpansions).
+                var need=await Task.Run(()=>CampaignExpansions.Required(dir));
+                if(need.Count>0&&!CampaignExpansions.Confirmed(dir,need)) {
+                    var ask=ConfirmOwnership;
+                    if(ask==null||!ask(CampaignSaves.Id(dir),need))throw new Exception("Not started: "+CampaignSaves.Id(dir)+" needs "+string.Join(" and ",need)+" on your Battle.net account");
+                    CampaignExpansions.Confirm(dir,need);
+                    Program.Log("Confirmed owning "+string.Join(" and ",need)+" for "+CampaignSaves.Id(dir)+".");
+                }
+            }
             SaveChoices(dir);
             SetRunning(true);Status("Starting…",LaunchTone.Busy);Latency(null);
             if(Campaign) {

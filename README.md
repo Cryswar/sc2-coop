@@ -48,6 +48,18 @@ co-op adapter scripts (`adapters/`) and rewriting the parts of the mission scrip
 traffic goes through a Steam networking or TCP tunnel between the two launchers. Nothing from the game is included in this
 repository or sent between PCs.
 
+## Blizzard content and expansions
+
+SC2Coop ships no Blizzard game files: no maps, mods, campaign data or assets, in the repository or in the release zip. Each
+launcher reads its own player's StarCraft II install and the campaign folder that player provides, and builds the co-op
+maps on that PC.
+
+Wings of Liberty is free. A campaign built on Heart of the Swarm or Legacy of the Void needs that expansion on each
+player's own Battle.net account. The launcher can't verify this: in the offline API mode it uses, StarCraft II reports no
+licenses at all, even for owners. So before the first start of such a campaign, each player's launcher asks them to
+confirm they own it. It's a declaration, not a check, and the answer is remembered per campaign. Please only play
+campaigns for expansions you own.
+
 ## Building
 
 1. Put the two third-party DLLs in `lib\` (they are not in the repository):

@@ -150,6 +150,7 @@ class LauncherWindow : Form {
         core.LatencyChanged+=t=>Ui(()=>{latency.Text=t??"";});
         core.LogLine+=line=>Ui(()=>log.AppendText(line+Environment.NewLine));
         core.RunningChanged+=on=>Ui(()=>SetRunning(on));
+        core.ConfirmOwnership=AskOwnership;
         FormClosing+=(s,e)=>{if(core.StopForClose())e.Cancel=true;};
         Shown+=async (s,e)=>{
             ActiveControl=null;RefreshReady();
@@ -429,6 +430,17 @@ class LauncherWindow : Form {
         core.SeparateUnits=SeparateOptions.UnitChoices[Math.Max(0,separateUnits.SelectedIndex)];core.SeparateMoney=SeparateOptions.MoneyChoices[Math.Max(0,separateMoney.SelectedIndex)];
         core.GameSpeed=Program.GameSpeeds[Math.Max(0,gameSpeed.SelectedIndex)];
         await core.Start(LauncherController.SteamTarget(friend.SelectedItem,friend.Text));
+    }
+
+    // A campaign that uses a paid expansion (CampaignExpansions): the launcher can't check ownership, so it asks.
+    bool AskOwnership(string campaignName,List<string> expansions) {
+        string list=string.Join(" and ",expansions);
+        return MessageBox.Show(this,"\""+campaignName+"\" uses content from "+list+".\n\n"+
+            "Do you own "+list+" on your Battle.net account?\n\n"+
+            "SC2Coop can't check this itself: StarCraft II doesn't report what an account owns in the offline mode the launcher uses. "+
+            "SC2Coop includes no Blizzard game files; each launcher builds the maps from that player's own StarCraft II, and each player "+
+            "confirms for themselves. You're asked once per campaign.",
+            "Expansion ownership",MessageBoxButtons.YesNo,MessageBoxIcon.Question,MessageBoxDefaultButton.Button2)==DialogResult.Yes;
     }
 
     async void OnPrepare(object sender,EventArgs e) {

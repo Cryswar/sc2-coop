@@ -191,6 +191,56 @@ static class CampaignSaves {
     }
 }
 
+// The paid expansion a campaign is (Heart of the Swarm or Legacy of the Void), from its metadata.txt (Custom Campaign Manager
+// "campaign=HotS"/"LotV"), else from the story campaign most of its maps are built on (DocumentInfo: Liberty/Swarm/Void Story,
+// or SwarmStoryUtil for HotS hubs). A WoL campaign that borrows one mission from a later campaign counts as WoL. The launcher
+// can't check what a Battle.net account owns: PlayerHasLicense is false for every license in API mode, owners included, and
+// API games load maps that depend on the paid campaigns without any check (license probe, 2026-10-24). So each player
+// confirms ownership once per campaign in their own launcher (LauncherController.Start); nothing from the game ships with SC2Coop.
+static class CampaignExpansions {
+    public const string Swarm="Heart of the Swarm",Void="Legacy of the Void";
+    static readonly Regex Story=new Regex(@"(Liberty|Swarm|Void) Story \(Campaign\)|Campaigns[\/](Liberty|Swarm|Void)Story(?:Util)?\.SC2(?:Campaign|Mod)",RegexOptions.IgnoreCase);
+    // Empty for Wings of Liberty (free) and campaigns of unknown kind.
+    public static List<string> Required(string campaignDir) {
+        try {
+            string meta=Path.Combine(campaignDir,"metadata.txt");
+            if(File.Exists(meta))foreach(var line in File.ReadAllLines(meta)) {
+                var m=Regex.Match(line,@"^\s*campaign\s*=\s*(\S+)",RegexOptions.IgnoreCase);if(!m.Success)continue;
+                string c=m.Groups[1].Value.ToLowerInvariant();
+                if(c=="hots"||c.StartsWith("swarm")||c.StartsWith("heart"))return new List<string>{Swarm};
+                if(c=="lotv"||c.StartsWith("void")||c.StartsWith("legacy"))return new List<string>{Void};
+                if(c=="wol"||c.StartsWith("liberty")||c.StartsWith("wings"))return new List<string>();
+            }
+        } catch { }
+        var maps=new Dictionary<string,int>(StringComparer.OrdinalIgnoreCase){{"Liberty",0},{"Swarm",0},{"Void",0}};
+        foreach(var p in Directory.GetFiles(campaignDir,"*.SC2Map",SearchOption.AllDirectories)) {
+            byte[] di;try{di=MapArchive.ReadFile(p,"DocumentInfo");}catch{continue;}if(di==null)continue;
+            foreach(var story in Story.Matches(Encoding.UTF8.GetString(di)).Cast<Match>().Select(m=>m.Groups[1].Success?m.Groups[1].Value:m.Groups[2].Value).Distinct(StringComparer.OrdinalIgnoreCase))maps[story]++;
+        }
+        var top=maps.OrderByDescending(kv=>kv.Value).First();
+        if(top.Value==0||top.Key.Equals("Liberty",StringComparison.OrdinalIgnoreCase))return new List<string>();
+        return new List<string>{top.Key.Equals("Swarm",StringComparison.OrdinalIgnoreCase)?Swarm:Void};
+    }
+    // Confirmations, per Windows user: one line per campaign, "<campaign save id>|<expansion>|<expansion>".
+    static string ConfirmationsFile{get{return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"SC2Coop","owned-expansions.txt");}}
+    public static bool Confirmed(string campaignDir,IEnumerable<string> expansions) {
+        string id=CampaignSaves.Id(campaignDir);
+        try {
+            if(!File.Exists(ConfirmationsFile))return false;
+            foreach(var line in File.ReadAllLines(ConfirmationsFile)){var parts=line.Split('|');if(parts[0]==id&&expansions.All(parts.Skip(1).Contains))return true;}
+        } catch { }
+        return false;
+    }
+    public static void Confirm(string campaignDir,IEnumerable<string> expansions) {
+        string id=CampaignSaves.Id(campaignDir);
+        try {
+            var lines=File.Exists(ConfirmationsFile)?File.ReadAllLines(ConfirmationsFile).Where(l=>l.Split('|')[0]!=id).ToList():new List<string>();
+            lines.Add(id+"|"+string.Join("|",expansions));
+            Directory.CreateDirectory(Path.GetDirectoryName(ConfirmationsFile));File.WriteAllLines(ConfirmationsFile,lines);
+        } catch(Exception e){Program.Log("Could not save the ownership confirmation: "+e.Message);}
+    }
+}
+
 static class MapInfoPlayers {
     class R {public byte[] d;public int at;public uint N(int size=4){ulong v=0;for(int i=0;i<size;i++)v|=(ulong)d[at+i]<<(8*i);at+=size;return (uint)v;}
         public void Text(){while(d[at]!=0)at++;at++;} public void Short(){int n=(int)N(2);if(n>=4096)throw new InvalidDataException("MapInfo short text");at+=n;}}
@@ -325,6 +375,8 @@ static class CampaignMaps {
             } catch(Exception e){Program.Log("Campaign: could not read the bank list of "+Path.GetFileName(p)+": "+e.Message);}
         }
         names.RemoveWhere(n=>n.StartsWith("Coop",StringComparison.OrdinalIgnoreCase));
+        // A name that can't be a file (The Swarm Reborn lists one with literal quotes, "ZCampaignStats") is never written.
+        foreach(var n in names.Where(n=>n.IndexOfAny(Path.GetInvalidFileNameChars())>=0).ToList()){names.Remove(n);Program.Log("Campaign: bank name "+n+" is not a valid file name; ignored");}
         playerBanks.RemoveWhere(n=>n.StartsWith("Coop",StringComparison.OrdinalIgnoreCase));
         names.ExceptWith(playerBanks);
         return names;
@@ -711,11 +763,12 @@ void CoopHubRecord(string lp_mission, bool lp_simulation, int lp_difficulty) {
         // A map with a second human player is made for separate armies: the guest takes that slot. Otherwise the guest gets a
         // copy of player 1's slot (shared army).
         int second=MapInfoPlayers.SecondHuman(f["MapInfo"]);bool authored=second>0;
-        if(authored)guest=second;else f["MapInfo"]=MapInfoPlayers.AddGuest(f["MapInfo"],out guest);
-        string s=Script(f),marker="void InitMap () {";
+        if(authored)guest=second;else f["MapInfo"]=MapInfoPlayers.AddGuest(f["MapInfo"],out guest);        string s=Script(f),marker="void InitMap () {";
         if(s.Split(new[]{marker},StringSplitOptions.None).Length!=2||!s.Contains("    InitTriggers();"))throw new Exception(mission+": unexpected script layout");
-        // WoL@Kit mission (libWCMI/libWoLC) or one on Blizzard's campaign library (libCamp, vanilla-based campaigns).
-        bool kit=Regex.IsMatch(s,@"\blib(WCMI|WoLC)_g[ft]_");
+        // WoL@Kit mission (libWCMI/libWoLC), a Heart of the Swarm one (libSwaC; some HotS mods' missions also call libCamp, so
+        // libSwaC is tested first) or one on Blizzard's WoL campaign library (libCamp, vanilla-based campaigns).
+        bool swarm=Regex.IsMatch(s,@"\blibSwaC_g[ft]_");
+        bool kit=!swarm&&Regex.IsMatch(s,@"\blib(WCMI|WoLC)_g[ft]_");
         s=Regex.Replace(s,@"\bObjective([GS])etState\(","CoopObjective$1etState(");
         string g=guest.ToString();
         string shared=File.ReadAllText(Path.Combine(Base,"campaign_shared_control.galaxy"));
@@ -856,27 +909,31 @@ void CoopCampaignInit() {
         //   -cooplose    defeat
         bool cheat=Regex.IsMatch(s,@"^trigger gt_VictoryCheat;",RegexOptions.Multiline),victory=Regex.IsMatch(s,@"^trigger gt_Victory;",RegexOptions.Multiline);
         string setOver=Regex.IsMatch(s,@"^bool gv_gameOver\b",RegexOptions.Multiline)?"gv_gameOver = true;\n        ":"";
-        // Kit (libWCMI) or Blizzard's library (libCamp, vanilla-based campaigns): same flow, different names. Blizzard's has no
-        // "game is over" query, so the commands keep their own flag there.
-        string lib=kit?"libWCMI":"libCamp";
-        string now=setOver+(kit?"libWCMI_gf_GameOver(libWCMI_ge_CampaignMissionGameResultType_Victory);\n        ":"coopDebugOver = true;\n        ")+
+        // Kit (libWCMI), HotS (libSwaC) or Blizzard's WoL library (libCamp, vanilla-based campaigns): same flow, different
+        // names. Blizzard's WoL library has no "game is over" query, so the commands keep their own flag there.
+        string lib=kit?"libWCMI":swarm?"libSwaC":"libCamp";
+        string isOver=kit?"libWCMI_gf_GameIsOver()":swarm?"libSwaC_gv_zS_GameOver":"coopDebugOver";
+        string setDebugOver=kit||swarm?"":"coopDebugOver = true;\n        ";
+        // HotS: the completion bookkeeping its victory sequence does, and its Continue trigger's condition (the button's
+        // click) skipped.
+        string now=setOver+(kit?"libWCMI_gf_GameOver(libWCMI_ge_CampaignMissionGameResultType_Victory);\n        ":swarm?"libSwaC_gf_ZS_GameOver();\n        libSwaC_gf_ZS_SaveMissionCompletion();\n        ":setDebugOver)+
             (victory?"TriggerExecute(gt_Victory, false, true);":lib+"_gf_EndCampaignMission(1, c_gameOverVictory);")+
-            "\n        Wait(2.0, c_timeReal);\n        TriggerExecute("+(kit?"libWCMI_gt_WM_VictoryContinue":"libCamp_gt_TS_VSScreenContinue")+", true, false);";
+            "\n        Wait(2.0, c_timeReal);\n        TriggerExecute("+(kit?"libWCMI_gt_WM_VictoryContinue, true":swarm?"libSwaC_gt_ZS_VSScreenContinue, false":"libCamp_gt_TS_VSScreenContinue, true")+", false);";
         // -coopwin plays the mission's real ending: the victory sequence with the trigger the mission's own completion passes
         // (e.g. gt_VictoryQ: setup, outro cinematic, cleanup). The missions' cheat triggers pass gt_Victory, which skips
         // the cinematic (2026-10-22: -coopwin looked like -coopwinnow).
         string outro=Regex.Matches(s,@"\b"+lib+@"_gf_RunMissionVictorySequence\((gt_\w+)\)").Cast<Match>().Select(m=>m.Groups[1].Value).FirstOrDefault(a=>a!="gt_Victory");
-        string win=outro!=null?setOver+(kit?"":"coopDebugOver = true;\n        ")+lib+"_gf_RunMissionVictorySequence("+outro+");":cheat?"TriggerExecute(gt_VictoryCheat, true, false);":now;
-        s+=(kit?"":"\nbool coopDebugOver = false;")+@"
+        string win=outro!=null?setOver+setDebugOver+lib+"_gf_RunMissionVictorySequence("+outro+");":cheat?"TriggerExecute(gt_VictoryCheat, true, false);":now;
+        s+=(kit||swarm?"":"\nbool coopDebugOver = false;")+@"
 bool CoopDebugEnd(bool testConds, bool runActions) {
     string word = StringWord(EventChatMessage(false), 1);
-    if (!runActions || "+(kit?"libWCMI_gf_GameIsOver()":"coopDebugOver")+@") { return true; }
+    if (!runActions || "+isOver+@") { return true; }
     if (word == ""-coopwin"") {
         " + win + @"
     } else if (word == ""-coopwinnow"") {
         " + now + @"
     } else if (word == ""-cooplose"") {
-        "+(kit?"":"coopDebugOver = true;\n        ")+lib+@"_gf_EndCampaignMission(1, c_gameOverDefeat);
+        "+setDebugOver+lib+@"_gf_EndCampaignMission(1, c_gameOverDefeat);
     } else if (word == ""-coopspeed"") {
         CoopSetSpeed(StringCase(StringWord(EventChatMessage(false), 2), false));
     } else if (word == ""-coopcolor"") {
@@ -896,6 +953,12 @@ bool CoopDebugEnd(bool testConds, bool runActions) {
             libWCMI_gf_ZS_SetMissionObjectiveState(StringWord(EventChatMessage(false), 2), libWoLC_ge_MissionObjectiveState_Failed);
         } else {
             libWCMI_gf_ZS_SetMissionObjectiveState(StringWord(EventChatMessage(false), 2), libWoLC_ge_MissionObjectiveState_Completed);
+        }":swarm?@"
+        // -coopobj ZChar01Objective1 [fail]: complete (or fail) a mission objective the way the mission script does.
+        if (StringWord(EventChatMessage(false), 3) == ""fail"") {
+            libSwaC_gf_ZS_SetMissionObjectiveState(StringWord(EventChatMessage(false), 2), libSwaC_ge_MissionObjectiveState_Failed);
+        } else {
+            libSwaC_gf_ZS_SetMissionObjectiveState(StringWord(EventChatMessage(false), 2), libSwaC_ge_MissionObjectiveState_Completed);
         }":@"
         // -coopobj <objective id> [fail]: complete (or fail) an objective by its engine id (vanilla objectives have no names).
         if (StringWord(EventChatMessage(false), 3) == ""fail"") {
@@ -934,6 +997,51 @@ void CoopKitObjectiveState(string lp_objective, int lp_state) {
 ";
             Program.Log(mission+": "+kitObjectiveCalls+" Kit objective state calls routed through the co-op objective handling");
         }
+        // HotS: the same for libSwaC_gf_ZS_SetMissionObjectiveState, plus the progress calls that complete an objective inside
+        // the library when the count is reached (SetMissionObjectiveProgress2, ...Advanced with its option, and
+        // ZS_SetObjectiveProgressData with true): they keep their bookkeeping and Kerrigan XP, but the completion goes through
+        // CoopSwarmObjectiveState.
+        int swarmObjectiveCalls=Regex.Matches(s,@"\blibSwaC_gf_(ZS_SetMissionObjectiveState|SetMissionObjectiveProgress2|SetMissionObjectiveProgressAdvanced|ZS_SetObjectiveProgressData)\(").Count;
+        if(swarm&&swarmObjectiveCalls>0&&Environment.GetEnvironmentVariable("SC2_COOP_NO_OBJECTIVE_FIX")!="1") {
+            s="void CoopSwarmObjectiveState(string lp_objective, int lp_state);\nvoid CoopSwarmObjectiveProgress(string lp_objective, int lp_progress, bool lp_updateState);\n"+
+                "void CoopSwarmObjectiveProgress2(string lp_objective, int lp_current, bool lp_showHideMax, text lp_label, bool lp_updatetext);\n"+
+                "void CoopSwarmObjectiveProgressAdvanced(string lp_objective, int lp_current, bool lp_showHideMax, text lp_label, bool lp_updatetext, bool lp_updateState);\n"+
+                Regex.Replace(s,@"\blibSwaC_gf_(ZS_SetMissionObjectiveState|SetMissionObjectiveProgress2|SetMissionObjectiveProgressAdvanced|ZS_SetObjectiveProgressData)\(",
+                    m=>m.Groups[1].Value=="ZS_SetMissionObjectiveState"?"CoopSwarmObjectiveState(":m.Groups[1].Value=="SetMissionObjectiveProgress2"?"CoopSwarmObjectiveProgress2(":
+                       m.Groups[1].Value=="SetMissionObjectiveProgressAdvanced"?"CoopSwarmObjectiveProgressAdvanced(":"CoopSwarmObjectiveProgress(")+@"
+void CoopSwarmObjectiveState(string lp_objective, int lp_state) {
+    string inst = libSwaC_gf_ZS_ObjectiveUserDataInstance(lp_objective);
+    int o = DataTableGetObjective(true, libSwaC_gf_ZS_ObjectiveTableString(lp_objective));
+    if (lp_state == libSwaC_ge_MissionObjectiveState_Completed) {
+        UserDataSetInt(""MissionObjective"", inst, ""Complete"", 1, 1);
+        UserDataSetInt(""MissionObjective"", inst, ""Available"", 1, 0);
+        UserDataSetInt(""MissionObjective"", inst, ""Progress"", 1, libSwaC_gf_MissionObjectiveItemCount(lp_objective));
+        CoopObjectiveSetState(o, c_objectiveStateCompleted);
+        return;
+    }
+    if (lp_state == libSwaC_ge_MissionObjectiveState_Failed) {
+        UserDataSetInt(""MissionObjective"", inst, ""Complete"", 1, 0);
+        CoopObjectiveSetState(o, c_objectiveStateFailed);
+        return;
+    }
+    libSwaC_gf_ZS_SetMissionObjectiveState(lp_objective, lp_state);
+}
+void CoopSwarmObjectiveProgress(string lp_objective, int lp_progress, bool lp_updateState) {
+    libSwaC_gf_ZS_SetObjectiveProgressData(lp_objective, lp_progress, false);
+    if (lp_updateState && lp_progress == libSwaC_gf_MissionObjectiveItemCount(lp_objective)) {
+        CoopSwarmObjectiveState(lp_objective, libSwaC_ge_MissionObjectiveState_Completed);
+    }
+}
+void CoopSwarmObjectiveProgress2(string lp_objective, int lp_current, bool lp_showHideMax, text lp_label, bool lp_updatetext) {
+    CoopSwarmObjectiveProgressAdvanced(lp_objective, lp_current, lp_showHideMax, lp_label, lp_updatetext, true);
+}
+void CoopSwarmObjectiveProgressAdvanced(string lp_objective, int lp_current, bool lp_showHideMax, text lp_label, bool lp_updatetext, bool lp_updateState) {
+    CoopSwarmObjectiveProgress(lp_objective, lp_current, lp_updateState);
+    if (lp_updatetext) { libSwaC_gf_UpdateMissionObjectiveText(lp_objective, lp_current, lp_showHideMax, lp_label); }
+}
+";
+            Program.Log(mission+": "+swarmObjectiveCalls+" HotS objective calls routed through the co-op objective handling");
+        }
         // Defeat: the campaign library's defeat shows SC2's defeat panel, whose "Return to <hub>" loads the next map, which
         // the launcher clears, so the lost game never ended (2026-10-22). Defeats (the mission's own and -cooplose) get a
         // co-op dialog for both players instead: "Retry mission" (noted in the CoopMission bank for the launcher, which
@@ -958,7 +1066,7 @@ bool CoopDefeatClick(bool testConds, bool runActions) {
     DialogSetVisible(coopDefeatDialog, PlayerGroupAll(), false);"+(kit?"":@"
     // The defeat in the campaign state, as Blizzard's own abort does (last mission: not successful, so the hub pays no
     // reward); the launcher decides what loads next.
-    libCamp_gf_PrepareForStoryMode(c_gameOverDefeat, libCamp_gf_TS_CampaignDifficulty());
+    "+(swarm?"libSwaC_gf_PrepareForStoryMode(c_gameOverDefeat, PlayerDifficulty(1));":"libCamp_gf_PrepareForStoryMode(c_gameOverDefeat, libCamp_gf_TS_CampaignDifficulty());")+@"
     GameSetNextMap("""");")+@"
     GameOver(1, c_gameOverDefeat, false, false);
     return true;
@@ -994,8 +1102,10 @@ void CoopEndCampaignMission(int lp_player, int lp_type) {
         // rewards minus purchases, mission progress set to the expected path, and the mission saved as the last successful
         // one (so a defeat still paid its reward). From the hub the call does nothing; same here (2026-10-22: credits jumped
         // around between missions).
-        if(!kit){int tech=Regex.Matches(s,@"\blibCamp_gf_PurchaseStorymodeTech\(\);").Count;
+        // HotS's version also runs the mission's tech limits, so only that part stays.
+        if(!kit){int tech=Regex.Matches(s,@"\blib(Camp|SwaC)_gf_PurchaseStorymodeTech\(\);").Count;
             s=Regex.Replace(s,@"\blibCamp_gf_PurchaseStorymodeTech\(\);","");  // (Galaxy has no /* */ comments)
+            s=Regex.Replace(s,@"\blibSwaC_gf_PurchaseStorymodeTech\(\);","TriggerExecute(libSwaC_gv_zS_TechLimitsCallback, true, false);");
             if(tech>0)Program.Log(mission+": the library's debug tech purchase skipped (as when started from the hub)");}
         f["MapScript.galaxy"]=Encoding.UTF8.GetBytes(s);AddBank(f,"CoopBridge",guest);AddBank(f,"CoopMission",1);TrialPreparation.AddCoopModels(f);
         Directory.CreateDirectory(outDir);string target=Path.Combine(outDir,mission+"-coop.SC2Map");File.WriteAllBytes(target,Mpq.Pack(f));
@@ -1299,7 +1409,10 @@ class CampaignRun {
         bankNames=CampaignMaps.CampaignBanks(campaignDir,out playerBanks);Program.Log("Campaign banks synced host -> guest: "+string.Join(", ",bankNames.OrderBy(x=>x)));
         if(playerBanks.Count>0)Program.Log("Per-player banks (each player keeps their own; not synced or swapped): "+string.Join(", ",playerBanks.OrderBy(x=>x)));
         CampaignMaps.HubPlayerBanks=playerBanks;
-        foreach(var who in Local?new[]{"host","guest"}:new[]{Hosting?"host":"guest"}){int c=ColorFor(who);
+        // Test hook: SC2_COOP_TEST_MISSION=<mission>[,<difficulty>] plays that one mission without the hubs (campaigns whose hub
+        // the launcher can't build yet, e.g. Heart of the Swarm), then ends the session. Difficulty 2 (Normal) by default.
+        string[] direct=(Environment.GetEnvironmentVariable("SC2_COOP_TEST_MISSION")??"").Split(new[]{','},StringSplitOptions.RemoveEmptyEntries);
+        if(direct.Length==0)foreach(var who in Local?new[]{"host","guest"}:new[]{Hosting?"host":"guest"}){int c=ColorFor(who);
             hubMaps[who]=CampaignMaps.BuildKitHub(campaignDir,Path.Combine(settings.Workspace,"campaign","maps"),c,ChatRgb(c),Local?"-"+who:"",who=="guest");}
         hubTitle=CampaignMaps.Title(campaignDir,"TStory01");
         Session link=null;
@@ -1321,7 +1434,11 @@ class CampaignRun {
             while(!stop.WaitOne(0)) {
                 Program.LogFile=log;
                 // After "Retry mission" in the defeat dialog the same mission starts again, without the hubs.
-                if(!retry) {
+                if(!retry&&direct.Length>0) {
+                    if(mission!=null)break;
+                    mission=direct[0];difficulty=direct.Length>1?int.Parse(direct[1]):2;replay=false;
+                    Program.Log("Test: playing "+mission+" without the hubs (difficulty "+difficulty+")");
+                } else if(!retry) {
                     var pick=HubStage();if(pick==null)break;
                     mission=(string)pick["mission"];difficulty=Convert.ToInt32(pick["difficulty"]);
                     replay=pick.ContainsKey("simulation")&&Convert.ToBoolean(pick["simulation"]);
@@ -1765,6 +1882,7 @@ class CampaignRun {
             else if(stage=="ready"){Curtain.Hide();var c=session.Clients.FirstOrDefault();if(c!=null)new Thread(()=>{while(!done&&!c.Process.HasExited){Curtain.Track(c.Process);Thread.Sleep(2000);}}){IsBackground=true}.Start();}
             else if(stage=="ended")Curtain.Show(hubTitle,"Returning to the campaign…");
         };
+        PressPastLoadingScreen(session,()=>done);
         TestWin(session);
         TestChat(session);
         TestCrash(session);
@@ -1798,6 +1916,26 @@ class CampaignRun {
     }
     bool missionReplay;  // the mission being played is a Mission Archives replay
     const string NotCounted="The mission does not count; the campaign continues from where it was before the mission.";
+
+    // Heart of the Swarm missions' loading screens wait for a key ("Press any key to continue"), which an API game never gets
+    // by itself. Every 2 s while a StarCraft II window of this launcher hasn't joined, it gets a Space press (posted, so it
+    // needs no focus); a loading screen that doesn't wait ignores it. Where the map stores that option wasn't found: the
+    // MapInfo bits that differ from WoL maps were tried and aren't it (2026-10-28).
+    [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool PostMessage(IntPtr hwnd,uint msg,IntPtr wParam,IntPtr lParam);
+    void PressPastLoadingScreen(Session session,Func<bool> done) {
+        new Thread(()=>{
+            int pressed=0;
+            while(!session.Stop.WaitOne(2000)&&!done()) {
+                var waiting=session.Clients.ToArray().Where(c=>!c.Joined&&!c.Process.HasExited).ToList();
+                if(session.Clients.Count>0&&waiting.Count==0)break;
+                foreach(var c in waiting)try {
+                    c.Process.Refresh();IntPtr hwnd=c.Process.MainWindowHandle;if(hwnd==IntPtr.Zero)continue;
+                    PostMessage(hwnd,0x0100,new IntPtr(0x20),new IntPtr(0x00390001));Thread.Sleep(30);PostMessage(hwnd,0x0101,new IntPtr(0x20),new IntPtr(unchecked((int)0xC0390001)));
+                    if(pressed++==0)Program.Log("Loading: pressing a key for StarCraft II windows still on the loading screen");
+                } catch{}
+            }
+        }){IsBackground=true}.Start();
+    }
 
     // Test hook: SC2_COOP_TEST_CRASH=<s>[,<client index>] kills that StarCraft II (default 0, this launcher's first) s seconds
     // after joining, like a crash. In local mode index 1 is the guest's window.
