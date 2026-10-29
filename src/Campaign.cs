@@ -340,6 +340,8 @@ static class CampaignMaps {
     public static HashSet<string> HubPlayerBanks=new HashSet<string>();
     // Whether the last hub built runs on WoL@Kit's library (else Blizzard's libCamp).
     public static bool LastHubKit;
+    // Whether it was a Heart of the Swarm hub (one per planet).
+    public static bool LastHubSwarm;
     // Mission game speed (Program.GameSpeeds name), applied a game second into each mission; -coopspeed changes it there.
     public static string GameSpeed="faster";
     // Missions made for separate armies (a second human player in the map), for the launcher's settings row.
@@ -351,9 +353,27 @@ static class CampaignMaps {
         }
         return list;
     }
+    // Heart of the Swarm names missions by id ("ZChar2") and its files with two digits (zchar02); evolution missions sit in
+    // an "evolution" folder.
     public static string FindMap(string campaignDir,string name) {
-        foreach(var p in Directory.GetFileSystemEntries(campaignDir,"*.SC2Map"))if(string.Equals(Path.GetFileNameWithoutExtension(p),name,StringComparison.OrdinalIgnoreCase))return p;
+        var names=new List<string>{name};var m=Regex.Match(name,@"^(\D+)(\d)$");if(m.Success)names.Add(m.Groups[1].Value+"0"+m.Groups[2].Value);
+        foreach(var dir in new[]{campaignDir,Path.Combine(campaignDir,"evolution")}) {
+            if(!Directory.Exists(dir))continue;
+            foreach(var n in names)foreach(var p in Directory.GetFileSystemEntries(dir,"*.SC2Map"))if(string.Equals(Path.GetFileNameWithoutExtension(p),n,StringComparison.OrdinalIgnoreCase))return p;
+        }
         return null;
+    }
+    // Heart of the Swarm campaigns: a hub map per planet (ZStoryChar, ...) instead of WoL's one TStory01.
+    public static bool IsSwarm(string campaignDir){return FindMap(campaignDir,"TStory01")==null&&FindMap(campaignDir,"ZStoryChar")!=null;}
+    // The hub a HotS mission returns to (its planet's), a hub itself, or null (evolution missions: the hub they came from).
+    public static string SwarmHubFor(string campaignDir,string mission) {
+        if(string.IsNullOrEmpty(mission))return null;
+        string hub=mission.StartsWith("ZStory",StringComparison.OrdinalIgnoreCase)?mission:null;
+        if(hub==null)foreach(var planet in new[]{"Char","Expedition","Zerus","Hybrid","Korhal","Space","Lab"})
+            if(Regex.IsMatch(mission,"^Z"+planet+@"\d",RegexOptions.IgnoreCase)){hub="ZStory"+planet;break;}
+        if(hub==null)return null;
+        if(FindMap(campaignDir,hub)!=null)return hub;
+        Program.Log("Campaign: no "+hub+" hub map in the campaign folder; using ZStoryChar");return "ZStoryChar";
     }
     // Player-1 bank names the campaign uses (hub + every mission): the set the host copies to the guest. Per-player banks
     // (PlayerBanks) are left out.
@@ -391,18 +411,24 @@ static class CampaignMaps {
     // view only: one army means the host's campaign progress counts, and purchases made in a second, separate hub game would
     // be lost (and vanilla WoL has no refunds).
     public static string BuildKitHub(string campaignDir,string outDir,int color,System.Drawing.Color chatColor,string tag){return BuildKitHub(campaignDir,outDir,color,chatColor,tag,false);}
-    public static string BuildKitHub(string campaignDir,string outDir,int color,System.Drawing.Color chatColor,string tag,bool guestHub) {
-        string src=FindMap(campaignDir,"TStory01");if(src==null)throw new Exception("No TStory01.SC2Map (the hub) in "+campaignDir);
+    public static string BuildKitHub(string campaignDir,string outDir,int color,System.Drawing.Color chatColor,string tag,bool guestHub){return BuildKitHub(campaignDir,outDir,color,chatColor,tag,guestHub,"TStory01");}
+    // hub: the hub map (TStory01; a Heart of the Swarm campaign has one per planet, ZStoryChar etc.).
+    public static string BuildKitHub(string campaignDir,string outDir,int color,System.Drawing.Color chatColor,string tag,bool guestHub,string hub) {
+        string src=FindMap(campaignDir,hub);if(src==null)throw new Exception("No "+hub+".SC2Map (the hub) in "+campaignDir);
         var f=MapArchive.Read(src);
         if(TeamColors.IsRgb(color)){int none=-1;AddCustomColors(f,TeamColors.CountFor(Program.CurrentInstall,src),ref color,ref none);}
         byte[] di;if(f.TryGetValue("DocumentInfo",out di))CheckDependencies(Program.CurrentInstall,di,"The campaign hub");
         string s=Script(f);
-        // Two campaign libraries: WoL@Kit (libWoLC, missions by name) and Blizzard's own (libCamp, missions by MapID; vanilla-based
-        // mods keep it). Kit's is a renamed copy of Blizzard's, so the hooks are the same with different names.
-        int calls=Regex.Matches(s,@"\blibWoLC_gf_LaunchMission\(").Count;bool kit=calls>0;
+        // Three campaign libraries: WoL@Kit (libWoLC, missions by name) and Blizzard's own (libCamp, missions by MapID; vanilla-based
+        // mods keep it), whose launch calls are in the hub script (Kit's is a renamed copy of Blizzard's, so the hooks are the
+        // same with different names); and Heart of the Swarm's (libSwaC with the SwarmStoryUtil hub library), whose launches
+        // are made inside the libraries: caught from its "leaving the hub" story event instead (CoopHubTransition).
+        bool swarm=Regex.IsMatch(s,@"\blib281DEC45_gf_InitializeSwarmStoryData\(");
+        int calls=Regex.Matches(s,@"\blibWoLC_gf_LaunchMission\(").Count;bool kit=!swarm&&calls>0;
         if(!kit)calls=Regex.Matches(s,@"\blibCamp_gf_LaunchMission\(").Count;
-        if(calls==0)throw new Exception("This hub has no mission launch calls (libWoLC_gf_LaunchMission or libCamp_gf_LaunchMission); only WoL@Kit and vanilla-based WoL campaigns are supported so far");
-        s=kit?Regex.Replace(s,@"\blibWoLC_gf_LaunchMission\(","CoopHubLaunchMission("):Regex.Replace(s,@"\blibCamp_gf_LaunchMission\(","CoopHubLaunchMissionId(");
+        if(calls==0&&!swarm)throw new Exception("This hub has no mission launch calls (libWoLC_gf_LaunchMission or libCamp_gf_LaunchMission); only WoL@Kit, vanilla-based WoL and Heart of the Swarm campaigns are supported so far");
+        if(!swarm)s=kit?Regex.Replace(s,@"\blibWoLC_gf_LaunchMission\(","CoopHubLaunchMission("):Regex.Replace(s,@"\blibCamp_gf_LaunchMission\(","CoopHubLaunchMissionId(");
+        string difficultyNow=kit?"libWoLC_gv_pCX_CampaignDifficulty":swarm?"libSwaC_gv_zSX_CampaignDifficulty":"libCamp_gf_TS_CampaignDifficulty()";
         // Mission Archives replays launch from Kit's library (libWCUI_gt_WU_ArchivesLogicMissionLaunch), not this script.
         // DisplayArchives registers that trigger as the UIMissionLaunch campaign event; right after it, ours takes its place.
         int archives=Regex.Matches(s,@"\blibWCUI_gf_DisplayArchives\(").Count;
@@ -414,13 +440,67 @@ static class CampaignMaps {
         var shopNames=guestHub?Regex.Matches(s,shops).Cast<Match>().Select(m=>m.Groups[1].Value).Distinct().ToList():new List<string>();
         int shopCalls=guestHub?Regex.Matches(s,shops).Count:0;
         if(guestHub)s=Regex.Replace(s,shops,"CoopHubView_$1(");
-        LastHubKit=kit;
+        LastHubKit=kit;LastHubSwarm=swarm;
         s=s.Replace("TriggerDebugWindowOpen(true)","TriggerDebugWindowOpen(false)");
-        if(!s.Contains("    InitTriggers();"))throw new Exception("TStory01: unexpected script layout");
+        if(!s.Contains("    InitTriggers();"))throw new Exception(hub+": unexpected script layout");
         s=s.Replace("    InitTriggers();","    InitTriggers();\n    CoopHubDebugInit();");
         s="void CoopHubLaunchMission(string lp_mission, bool lp_simulation, int lp_difficulty);\nvoid CoopHubDebugInit();\nvoid CoopHubRecord(string lp_mission, bool lp_simulation, int lp_difficulty);\n"+
             string.Concat(shopNames.Select(n=>"void CoopHubView_"+n+"(trigger lp_exitTrigger);\n"))+
-            (kit?"void CoopHubDisplayArchives(trigger lp_exitTrigger, trigger lp_sceneFinishCallback);\n":"void CoopHubLaunchMissionId(int lp_mission, bool lp_simulation, int lp_difficulty);\n")+s+(kit?@"
+            (kit?"void CoopHubDisplayArchives(trigger lp_exitTrigger, trigger lp_sceneFinishCallback);\n":swarm?"":"void CoopHubLaunchMissionId(int lp_mission, bool lp_simulation, int lp_difficulty);\n")+s+(swarm?@"
+// Heart of the Swarm: the libraries launch missions (mission screen, evolution missions) and travel to another planet's hub
+// themselves, and every exit dispatches the TransitionFromStoryMap story event first (""Mission"" or ""Story""), with the
+// target still in the hub library's state. CoopHubTransition takes that event's one callback slot (re-taken whenever a
+// library registers its own), records the target like a WoL pick, then runs the callback it replaced. A planet hub
+// (""ZStory..."") as the pick means travel: the launcher opens that hub next.
+trigger coopHubTransition = null;
+trigger coopHubTransitionNext = null;
+string coopHubLaunching = """";
+bool CoopHubTransition(bool testConds, bool runActions) {
+    string kind;
+    string target = coopHubLaunching;
+    int room;
+    if (!runActions) { return true; }
+    kind = libSwaC_gf_StoryEventParameter(libSwaC_ge_ZS_Event_TransitionFromStoryMap, 1);
+    room = lib281DEC45_gf_CurrentRoom();
+    if (target == """" && kind == ""Story"") { target = lib281DEC45_gv_zSS_UITravelMaps[lib281DEC45_gv_zSS_UITravelSelectedPlanet]; }
+    else if (target == """" && (room == lib281DEC45_ge_Rooms_StoryRoomEggRoom || room == lib281DEC45_ge_Rooms_StoryRoomEvolutionMissionScreen)) { target = libSwaC_gv_zS_ArmyCustomMissionMap; }
+    else if (target == """" && room != lib281DEC45_ge_Rooms_StoryRoomMissionScreen && !libSwaC_gf_MissionStatusCheck(""ZLab1"", libSwaC_ge_MissionStatus_Completed)) {
+        // The hub's own start of a new campaign (lib281DEC45 entry: ZLab1 launched straight after the entry scenes).
+        target = ""ZLab1"";
+    }
+    else if (target == """") { target = lib281DEC45_gv_zSS_NextMission; }
+    if (target == null || target == """") {
+        UIDisplayMessage(PlayerGroupAll(), c_messageAreaSubtitle, StringToText(""Co-op: this launch wasn't recognized (room "" + IntToString(room) + "")""));
+    } else {
+        // A mission started from the hub begins from a fresh snapshot of the campaign state, as a launch from the hub makes.
+        if (kind == ""Mission"") { libSwaC_gf_ZS_SetMissionSectionExists(target, false); }
+        CoopHubRecord(target, false, libSwaC_gv_zSX_CampaignDifficulty);
+    }
+    if (coopHubTransitionNext != null) { TriggerExecute(coopHubTransitionNext, true, true); }
+    return true;
+}
+bool CoopHubTransitionHook(bool testConds, bool runActions) {
+    if (!runActions) { return true; }
+    if (coopHubTransition == null) { coopHubTransition = TriggerCreate(""CoopHubTransition""); }
+    if (libSwaC_gv_zS_EventCallback[libSwaC_ge_ZS_Event_TransitionFromStoryMap] != coopHubTransition) {
+        coopHubTransitionNext = libSwaC_gv_zS_EventCallback[libSwaC_ge_ZS_Event_TransitionFromStoryMap];
+        libSwaC_gf_RegisterStoryEvent(libSwaC_ge_ZS_Event_TransitionFromStoryMap, coopHubTransition);
+    }
+    return true;
+}
+// The other player's pick (-cooplaunch): the same mission, or travel to the same planet.
+void CoopHubLaunchMission(string lp_mission, bool lp_simulation, int lp_difficulty) {
+    coopHubLaunching = lp_mission;
+    if (StringSub(lp_mission, 1, 6) == ""ZStory"") { libSwaC_gf_StoryMapSwitch(lp_mission); }
+    else { libSwaC_gf_LaunchMission(lp_mission, lp_simulation, lp_difficulty); }
+    GameSetNextMap("""");
+}
+// The launcher starts what comes next; the library's launch set the next map before ending the game.
+bool CoopHubNoNextMap(bool testConds, bool runActions) {
+    if (runActions) { GameSetNextMap(""""); }
+    return true;
+}
+":"")+(kit?@"
 // Mission Archives: the same mission and difficulty Kit's own launch trigger picks, recorded like a star map pick
 // (simulation = replay). Only while Kit's archives launch trigger is on, as the event is Kit's for that panel only.
 bool CoopHubArchivesLaunch(bool testConds, bool runActions) {
@@ -440,7 +520,7 @@ void CoopHubDisplayArchives(trigger lp_exitTrigger, trigger lp_sceneFinishCallba
     if (coopHubArchivesLaunch == null) { coopHubArchivesLaunch = TriggerCreate(""CoopHubArchivesLaunch""); }
     libWoLC_gf_RegisterCampaignEvent(libWoLC_ge_WC_Event_UIMissionLaunch, coopHubArchivesLaunch);
 }
-":@"
+":swarm?"":@"
 // A mission's map file name without "".SC2Map"" (Blizzard's table has ""TRaynor01""; mods may add the extension).
 string CoopHubMapName(int lp_mission) {
     string name = libCamp_gv_tS_MapFile[(lp_mission)];
@@ -489,7 +569,7 @@ void CoopHubLaunchMission(string lp_mission, bool lp_simulation, int lp_difficul
 // player started (CampaignRun.FollowPick).
 bool CoopHubChat(bool testConds, bool runActions) {
     string mission = StringWord(EventChatMessage(false), 2);
-    int difficulty = "+(kit?"libWoLC_gv_pCX_CampaignDifficulty":"libCamp_gf_TS_CampaignDifficulty()")+@";
+    int difficulty = "+difficultyNow+@";
     bool replay = StringWord(EventChatMessage(false), 3) == ""replay"";
     if (!runActions || mission == null || mission == """") { return true; }
     if (replay && StringWord(EventChatMessage(false), 4) != """") { difficulty = StringToInt(StringWord(EventChatMessage(false), 4)); }"+(kit?@"
@@ -603,10 +683,12 @@ bool CoopHubColor(bool testConds, bool runActions) {
     TriggerAddEventTimeElapsed(TriggerCreate(""CoopHubDifficulty""), 1.0, c_timeReal);
     TriggerAddEventChatMessage(TriggerCreate(""CoopHubChat""), c_playerAny, ""-cooplaunch"", false);
     TriggerAddEventChatMessage(TriggerCreate(""CoopHubSave""), c_playerAny, ""-coopsave"", false);"+(guestHub?"":@"
-    TriggerAddEventTimeElapsed(TriggerCreate(""CoopHubAutoSave""), 10.0, c_timeReal);")+(guestHub&&!kit?@"
+    TriggerAddEventTimeElapsed(TriggerCreate(""CoopHubAutoSave""), 10.0, c_timeReal);")+(guestHub&&!kit&&!swarm?@"
     TriggerEnable(libCamp_gt_TSTechConsolePurchase, false);
     TriggerEnable(libCamp_gt_TS_MercUIPurchase, false);
-    TriggerEnable(libCamp_gt_TS_ResearchUIPurchase, false);":"")+(kit?"":@"
+    TriggerEnable(libCamp_gt_TS_ResearchUIPurchase, false);":"")+(swarm?@"
+    TriggerAddEventTimePeriodic(TriggerCreate(""CoopHubTransitionHook""), 0.25, c_timeReal);
+    TriggerAddEventPlayerLeft(TriggerCreate(""CoopHubNoNextMap""), 1, c_gameResultVictory);":"")+(kit||swarm?"":@"
     TriggerEnable(libCamp_gt_TS_BattleReportMissionReplay, false);
     TriggerAddEventBattleReportPanelPlayMission(TriggerCreate(""CoopHubArchivesReplay""), c_playerAny);")+(Regex.IsMatch(s,@"^trigger gt_BridgeMissionArchivesClicked;",RegexOptions.Multiline)?@"
     TriggerAddEventChatMessage(TriggerCreate(""CoopHubArchivesTest""), c_playerAny, ""-cooparchives"", true);":"")+@"
@@ -623,7 +705,7 @@ bool CoopHubColor(bool testConds, bool runActions) {
 // grew by a mission reward each time).
 void CoopHubSaveNow() {
     bank b;
-    " + (kit?"libWoLC_gf_PS_SaveAllTransitionData":"libCamp_gf_TS_SaveAllTransitionData") + @"(false, false, false);
+    " + (kit?"libWoLC_gf_PS_SaveAllTransitionData":swarm?"libSwaC_gf_ZS_SaveAllTransitionData":"libCamp_gf_TS_SaveAllTransitionData") + @"(false, false, false);
     b = BankLoad(""CoopHub"", 1);
     BankValueSetFromInt(b, ""Saved"", ""seq"", BankValueGetAsInt(b, ""Saved"", ""seq"") + 1);
     BankSave(b);
@@ -639,7 +721,7 @@ bool CoopHubSave(bool testConds, bool runActions) {
 // solo play; this hub is a new API game, so it was always Normal (2026-10-23). The campaign's saved difficulty (the last
 // one picked for a mission) instead, once the hub's story data has loaded.
 bool CoopHubDifficulty(bool testConds, bool runActions) {
-    int d = "+(kit?"libWoLC_gv_pCX_CampaignDifficulty":"libCamp_gf_TS_CampaignDifficulty()")+@";
+    int d = "+difficultyNow+@";
     if (runActions && d > 0) { PlayerSetDifficulty(1, d); }
     return true;
 }
@@ -651,7 +733,7 @@ bool CoopHubAutoSave(bool testConds, bool runActions) {
 void CoopHubShopNote() {
     CoopHubChatAdd(StringToText(""Co-op: view only. The host buys upgrades, research and mercenaries; they count for both of you."+(kit?" Changes made here are not kept.":"")+@"""));
 }
-"+(kit?"":@"// Mission Archives replay (Blizzard's library): its own trigger (libCamp_gt_TS_BattleReportMissionReplay, turned off)
+"+(kit||swarm?"":@"// Mission Archives replay (Blizzard's library): its own trigger (libCamp_gt_TS_BattleReportMissionReplay, turned off)
 // launches through the library, past CoopHubLaunchMissionId, so the pick wasn't recorded and the session ended (2026-10-23).
 // The same steps, through ours.
 bool CoopHubArchivesReplay(bool testConds, bool runActions) {
@@ -695,8 +777,8 @@ void CoopHubRecord(string lp_mission, bool lp_simulation, int lp_difficulty) {
         // wipes the player's file. WoL+'s library pays victories in any map (PlayerLeft with victory), and the hub's mission
         // launch is player 1's victory: both players' cryswolcoop came back empty (2026-10-25).
         foreach(var n in HubPlayerBanks)AddBank(f,n,1);
-        Directory.CreateDirectory(outDir);string target=Path.Combine(outDir,"TStory01-coop"+tag+".SC2Map");File.WriteAllBytes(target,Mpq.Pack(f));
-        Program.Log("Campaign hub built ("+(kit?"WoL@Kit":"Blizzard campaign library")+", "+calls+" launch calls"+(archives>0?", "+archives+" Mission Archives calls":"")+" wrapped"+(guestHub?", "+shopCalls+" shop calls view only (buddy's hub)":"")+"): "+target);
+        Directory.CreateDirectory(outDir);string target=Path.Combine(outDir,hub+"-coop"+tag+".SC2Map");File.WriteAllBytes(target,Mpq.Pack(f));
+        Program.Log("Campaign hub "+hub+" built ("+(kit?"WoL@Kit":swarm?"Heart of the Swarm, launches caught from its story event":"Blizzard campaign library")+(swarm?"":", "+calls+" launch calls")+(archives>0?", "+archives+" Mission Archives calls":"")+" wrapped"+(guestHub?", "+shopCalls+" shop calls view only (buddy's hub)":"")+"): "+target);
         return target;
     }
 
@@ -763,7 +845,8 @@ void CoopHubRecord(string lp_mission, bool lp_simulation, int lp_difficulty) {
         // A map with a second human player is made for separate armies: the guest takes that slot. Otherwise the guest gets a
         // copy of player 1's slot (shared army).
         int second=MapInfoPlayers.SecondHuman(f["MapInfo"]);bool authored=second>0;
-        if(authored)guest=second;else f["MapInfo"]=MapInfoPlayers.AddGuest(f["MapInfo"],out guest);        string s=Script(f),marker="void InitMap () {";
+        if(authored)guest=second;else f["MapInfo"]=MapInfoPlayers.AddGuest(f["MapInfo"],out guest);
+        string s=Script(f),marker="void InitMap () {";
         if(s.Split(new[]{marker},StringSplitOptions.None).Length!=2||!s.Contains("    InitTriggers();"))throw new Exception(mission+": unexpected script layout");
         // WoL@Kit mission (libWCMI/libWoLC), a Heart of the Swarm one (libSwaC; some HotS mods' missions also call libCamp, so
         // libSwaC is tested first) or one on Blizzard's WoL campaign library (libCamp, vanilla-based campaigns).
@@ -1418,9 +1501,9 @@ class CampaignRun {
         // Test hook: SC2_COOP_TEST_MISSION=<mission>[,<difficulty>] plays that one mission without the hubs (campaigns whose hub
         // the launcher can't build yet, e.g. Heart of the Swarm), then ends the session. Difficulty 2 (Normal) by default.
         string[] direct=(Environment.GetEnvironmentVariable("SC2_COOP_TEST_MISSION")??"").Split(new[]{','},StringSplitOptions.RemoveEmptyEntries);
-        if(direct.Length==0)foreach(var who in Local?new[]{"host","guest"}:new[]{Hosting?"host":"guest"}){int c=ColorFor(who);
-            hubMaps[who]=CampaignMaps.BuildKitHub(campaignDir,Path.Combine(settings.Workspace,"campaign","maps"),c,ChatRgb(c),Local?"-"+who:"",who=="guest");}
-        hubTitle=CampaignMaps.Title(campaignDir,"TStory01");
+        // Heart of the Swarm: the hub is the planet's, chosen once the campaign state is known (BuildHubs before each hub stage).
+        swarm=CampaignMaps.IsSwarm(campaignDir);
+        if(direct.Length==0&&!swarm)BuildHubs("TStory01");
         Session link=null;
         try {
             if(!Local) {
@@ -1436,7 +1519,8 @@ class CampaignRun {
             }
             if(Hosting||Local)LoadSave();
             if(Local)CopyBanks(Banks("host"),Banks("guest"));else if(Hosting)SendBanks();else ReceiveBanks(TimeSpan.FromMinutes(5));
-            string mission=null;int difficulty=0;bool retry=false,replay=false;
+            if(swarm){swarmHub=CampaignMaps.SwarmHubFor(campaignDir,LastMap())??"ZStoryChar";Program.Log("Heart of the Swarm campaign; starting at the "+swarmHub+" hub");}
+            string mission=null,chain=null;int difficulty=0;bool retry=false,replay=false;
             while(!stop.WaitOne(0)) {
                 Program.LogFile=log;
                 // After "Retry mission" in the defeat dialog the same mission starts again, without the hubs.
@@ -1444,9 +1528,14 @@ class CampaignRun {
                     if(mission!=null)break;
                     mission=direct[0];difficulty=direct.Length>1?int.Parse(direct[1]):2;replay=false;
                     Program.Log("Test: playing "+mission+" without the hubs (difficulty "+difficulty+")");
+                } else if(!retry&&chain!=null) {
+                    mission=chain;replay=false;Program.Log("Next: "+mission+" (the opening missions play back to back)");
                 } else if(!retry) {
+                    if(swarm)BuildHubs(swarmHub);
                     var pick=HubStage();if(pick==null)break;
                     mission=(string)pick["mission"];difficulty=Convert.ToInt32(pick["difficulty"]);
+                    // HotS travel: the other planet's hub opens next (both players).
+                    if(swarm&&mission.StartsWith("ZStory",StringComparison.OrdinalIgnoreCase)){swarmHub=CampaignMaps.SwarmHubFor(campaignDir,mission);Program.Log("Travelling to "+swarmHub);continue;}
                     replay=pick.ContainsKey("simulation")&&Convert.ToBoolean(pick["simulation"]);
                     if(mission.Equals("TSimulator",StringComparison.OrdinalIgnoreCase)||mission.Equals("TArcade",StringComparison.OrdinalIgnoreCase)) {
                         Program.Log("The "+mission.Substring(1)+" is not available in co-op yet; back to the hub.");continue;
@@ -1457,14 +1546,15 @@ class CampaignRun {
                 if(!retry&&!replay&&(Hosting||Local)&&!CampaignMaps.LastHubKit)DropMissionSnapshot(mission);
                 missionReplay=replay;
                 MissionStage(mission,difficulty);
+                if(swarm)swarmHub=CampaignMaps.SwarmHubFor(campaignDir,mission)??swarmHub;
                 Program.LogFile=log;
-                if(Hosting||Local){retry=RetryChosen();StoreSave();}
+                if(Hosting||Local){retry=RetryChosen();StoreSave();chain=retry?null:SwarmChain(mission);}
                 if(Local)CopyBanks(Banks("host"),Banks("guest"));
-                else if(Hosting){SendBanks();Send(new Dictionary<string,object>{{"type","next"},{"retry",retry}});}
+                else if(Hosting){SendBanks();Send(new Dictionary<string,object>{{"type","next"},{"retry",retry},{"chain",chain}});}
                 else {
                     ReceiveBanks(TimeSpan.FromMinutes(5));
                     var next=Take(Type("next"),60000);if(next==null)throw Gone("The host did not say what comes after the mission");
-                    retry=Convert.ToBoolean(next["retry"]);
+                    retry=Convert.ToBoolean(next["retry"]);chain=next.ContainsKey("chain")?(string)next["chain"]:null;
                 }
                 if(retry)Program.Log("Retrying "+mission+" (chosen after the defeat)");
             }
@@ -1657,6 +1747,7 @@ class CampaignRun {
         else h.Client=new GameClient(settings,Root(who),true,Program.Log);
         var created=h.Client.Request(1,Wire.Join(Wire.Msg(1,Wire.Str(1,hubMaps[who])),Wire.Msg(3,Wire.Num(1,1)),Wire.Num(6,1)),120).M(1);
         if(created.N(1)!=0)throw new Exception("Hub CreateGame failed: "+created.N(1)+" "+created.S(2));
+        PressPastLoadingScreen(h.Client);
         var joined=h.Client.Request(2,Wire.Join(Wire.Num(1,1),Wire.Msg(3,Wire.Num(1,settings.Raw?1UL:0)),Wire.Str(7,who=="guest"&&Local?"Buddy":Program.MyName())),300).M(2);
         if(joined.N(2)!=0)throw new Exception("Hub JoinGame failed: "+joined.N(2)+" "+joined.S(3));
         h.Client.Joined=true;Curtain.Hide();Program.Log("Hub open ("+who+"). Pick a mission on the star map / mission screen.");
@@ -1818,6 +1909,30 @@ class CampaignRun {
     }
 
     string hubTitle="Campaign";
+    bool swarm;string swarmHub;
+    // HotS opening: ZLab1-3 play back to back (ZStoryLab only shows the next one's mission screen), so after a won ZLab1 or
+    // ZLab2 the next one starts without a hub.
+    string SwarmChain(string mission) {
+        if(!swarm||LastInfo("LastMission","string")!=mission||LastInfo("LastMissionSuccess","flag")!="1")return null;
+        if(mission.Equals("ZLab1",StringComparison.OrdinalIgnoreCase))return "ZLab2";
+        if(mission.Equals("ZLab2",StringComparison.OrdinalIgnoreCase))return "ZLab3";
+        return null;
+    }
+    // Each player's hub carries their own color (local mode: one hub per window).
+    void BuildHubs(string hub) {
+        foreach(var who in Local?new[]{"host","guest"}:new[]{Hosting?"host":"guest"}){int c=ColorFor(who);
+            hubMaps[who]=CampaignMaps.BuildKitHub(campaignDir,Path.Combine(settings.Workspace,"campaign","maps"),c,ChatRgb(c),Local?"-"+who:"",who=="guest",hub);}
+        hubTitle=CampaignMaps.Title(campaignDir,hub);
+    }
+    // HotS: a key of the campaign state's CampaignLastInfo (ZCampaign bank): LastMap picks the planet's hub.
+    string LastMap(){return LastInfo("LastMap","string");}
+    string LastInfo(string key,string type) {
+        try {
+            string p=Path.Combine(Banks(Hosting||Local?"host":"guest"),"ZCampaign.SC2Bank");if(!File.Exists(p))return null;
+            var sec=XDocument.Load(p).Root.Elements("Section").FirstOrDefault(x=>(string)x.Attribute("name")=="ZCampaign|CampaignLastInfo");if(sec==null)return null;
+            var k=sec.Elements("Key").FirstOrDefault(x=>(string)x.Attribute("name")==key);return k==null?null:(string)k.Element("Value").Attribute(type);
+        } catch(Exception e){Program.Log("Campaign: could not read "+key+": "+e.Message);return null;}
+    }
     void ShowMissionCurtain(Dictionary<string,object> pick){Curtain.Show(CampaignMaps.Title(campaignDir,(string)pick["mission"]),"Starting the mission…");}
 
     void Go(Dictionary<string,object> pick){var go=new Dictionary<string,object>(pick);go["type"]="go";if(tunnel!=null)Send(go);}
@@ -1928,12 +2043,15 @@ class CampaignRun {
     // needs no focus); a loading screen that doesn't wait ignores it. Where the map stores that option wasn't found: the
     // MapInfo bits that differ from WoL maps were tried and aren't it (2026-10-28).
     [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool PostMessage(IntPtr hwnd,uint msg,IntPtr wParam,IntPtr lParam);
-    void PressPastLoadingScreen(Session session,Func<bool> done) {
+    void PressPastLoadingScreen(Session session,Func<bool> done){PressPastLoadingScreen(session.Stop,()=>session.Clients.ToArray(),done);}
+    // A hub (StartHub): the same for its one window.
+    void PressPastLoadingScreen(GameClient client){PressPastLoadingScreen(stop,()=>new[]{client},()=>client.Joined||client.Process.HasExited);}
+    void PressPastLoadingScreen(WaitHandle stopped,Func<GameClient[]> clients,Func<bool> done) {
         new Thread(()=>{
             int pressed=0;
-            while(!session.Stop.WaitOne(2000)&&!done()) {
-                var waiting=session.Clients.ToArray().Where(c=>!c.Joined&&!c.Process.HasExited).ToList();
-                if(session.Clients.Count>0&&waiting.Count==0)break;
+            while(!stopped.WaitOne(2000)&&!done()) {
+                var all=clients();var waiting=all.Where(c=>!c.Joined&&!c.Process.HasExited).ToList();
+                if(all.Length>0&&waiting.Count==0)break;
                 foreach(var c in waiting)try {
                     c.Process.Refresh();IntPtr hwnd=c.Process.MainWindowHandle;if(hwnd==IntPtr.Zero)continue;
                     PostMessage(hwnd,0x0100,new IntPtr(0x20),new IntPtr(0x00390001));Thread.Sleep(30);PostMessage(hwnd,0x0101,new IntPtr(0x20),new IntPtr(unchecked((int)0xC0390001)));

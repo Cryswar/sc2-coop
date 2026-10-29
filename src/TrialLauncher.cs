@@ -637,7 +637,7 @@ class Program {
             // campaign-build <config> <campaign folder> <mission> [difficulty]: offline check of the hub and mission builders.
             if(args.Length>0&&args[0]=="campaign-build") {
                 var st=Load(Path.GetFullPath(args[1]));string outDir=Path.Combine(st.Workspace,"campaign","maps");CurrentInstall=st.Install;
-                CampaignMaps.BuildKitHub(args[2],outDir);int guest;CampaignMaps.BuildMission(args[2],args[3],args.Length>4?int.Parse(args[4]):2,outDir,out guest);
+                if(CampaignMaps.IsSwarm(args[2]))CampaignMaps.BuildKitHub(args[2],outDir,-1,System.Drawing.Color.FromArgb(0,66,255),"",false,"ZStoryChar");else CampaignMaps.BuildKitHub(args[2],outDir);int guest;CampaignMaps.BuildMission(args[2],args[3],args.Length>4?int.Parse(args[4]):2,outDir,out guest);
                 Log("Campaign banks: "+string.Join(", ",CampaignMaps.CampaignBanks(args[2])));return 0;
             }
             // campaign-check <campaign folder> [report.md]: what each map aims at player 1 (Campaign.cs CampaignCheck).
