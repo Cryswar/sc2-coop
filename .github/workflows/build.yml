@@ -27,7 +27,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release download --repo $env:GITHUB_REPOSITORY --pattern SC2Coop.zip --dir release
+          # Pre-releases count too (gh's default "latest" skips them).
+          $tag=gh release list --repo $env:GITHUB_REPOSITORY --limit 1 --json tagName --jq '.[0].tagName'
+          gh release download $tag --repo $env:GITHUB_REPOSITORY --pattern SC2Coop.zip --dir release
           Expand-Archive release\SC2Coop.zip release\unzipped
           New-Item -ItemType Directory -Force lib | Out-Null
           Copy-Item release\unzipped\CascLib.dll, release\unzipped\steam_api64.dll lib
