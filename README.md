@@ -74,6 +74,12 @@ Releasing: set `Program.Version` (in `src\TrialLauncher.cs`) to the new version,
 `gh release create v<version> out\SC2Coop.zip`. Launchers compare their version with the newest release on GitHub and
 show an update button when one is newer.
 
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by
+[SignPath Foundation](https://signpath.org) (applied for; releases up to v0.2.0 are unsigned). Team roles, what is
+signed, and the privacy policy: [`docs/CODE-SIGNING-POLICY.md`](docs/CODE-SIGNING-POLICY.md).
+
 ## License
 
 MIT, see [LICENSE](LICENSE). Third-party:
