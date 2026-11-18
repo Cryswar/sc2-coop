@@ -4,7 +4,7 @@ Two-player online co-op for StarCraft II: Wings of Liberty campaigns. Both playe
 the mission, and both play it together, sharing one army by default. Campaign progress, credits and upgrades follow the
 host's save.
 
-**Status: early test builds.** Expect rough edges; bug reports with the launcher's log are welcome.
+**Status: beta.** It works, but expect rough edges; bug reports with the launcher's log are welcome.
 
 ## Download
 
