@@ -1,0 +1,50 @@
+# Builds SC2Coop.zip on GitHub's Windows runner with build.ps1, from the repository as it is at that commit, and attests the
+# build: anyone can check that a zip came from this repository and commit (gh attestation verify SC2Coop.zip -R Cryswar/sc2-coop).
+# The two third-party DLLs aren't in the repository; they come from the newest release's zip, unchanged.
+# Nothing is published: the zip is a workflow artifact. To release it, download the artifact and attach it with
+# gh release create v<version> SC2Coop.zip.
+name: Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Third-party DLLs from the newest release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download --repo $env:GITHUB_REPOSITORY --pattern SC2Coop.zip --dir release
+          Expand-Archive release\SC2Coop.zip release\unzipped
+          New-Item -ItemType Directory -Force lib | Out-Null
+          Copy-Item release\unzipped\CascLib.dll, release\unzipped\steam_api64.dll lib
+
+      - name: Build
+        shell: pwsh
+        run: .\build.ps1
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            out/SC2Coop.zip
+            out/SC2Coop/SC2Coop.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SC2Coop-${{ github.sha }}
+          path: out/SC2Coop.zip
+          if-no-files-found: error
